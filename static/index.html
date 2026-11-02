@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123d35">
+  <meta name="description" content="四位好友，一桌法式塔罗。支持实时联机、断线返回与自动计分。">
+  <title>法式塔罗 · 四人牌桌</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23123d35'/%3E%3Ctext x='32' y='47' text-anchor='middle' font-size='48' fill='%23e9c98b'%3E♠%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="法式塔罗首页"><span class="brand-mark">♠</span><span>法式塔罗<small>JEU DE TAROT</small></span></a>
+    <div class="header-right"><span id="connection" class="connection">私人四人牌桌</span><button id="rules-open" class="button quiet">玩法说明 <span aria-hidden="true">↗</span></button></div>
+  </header>
+
+  <main>
+    <section id="welcome" class="welcome">
+      <div class="welcome-copy">
+        <div class="eyebrow">UNE TABLE, QUATRE AMIS</div>
+        <h1>四位好友，<br>一桌<span>法式塔罗。</span></h1>
+        <p class="intro">从第一张牌，到最后一墩。<br>坐下来，让这场 78 张牌的较量开始。</p>
+        <div class="welcome-facts"><span><b>04</b> 位玩家</span><span><b>78</b> 张牌</span><span><b>18</b> 墩较量</span></div>
+        <div class="ornament" aria-hidden="true">♠ <span>♥</span> ♦ ♣</div>
+      </div>
+      <div class="join-panel">
+        <div class="panel-heading"><span class="eyebrow">VOTRE PLACE</span><span id="occupancy" class="pill">四人房间</span></div>
+        <h2>为你留个座位</h2>
+        <p>与好友打开同一个网址，即可在这里相聚。</p>
+        <form id="join-form">
+          <label for="nickname">你的昵称</label>
+          <input id="nickname" name="nickname" maxlength="16" placeholder="让朋友们认出你" autocomplete="nickname" required>
+          <button id="join-button" class="button primary join-button" type="submit">入座 <span aria-hidden="true">→</span></button>
+        </form>
+        <button id="resume-button" class="button primary" hidden>返回我的座位 →</button>
+        <p id="resume-note" class="resume-note" hidden>你已离开牌桌，座位已保留。局中离开会按原计时自动出牌；四人都离开时暂停。</p>
+        <p id="join-error" class="error-text" role="alert"></p>
+        <div class="join-note"><span aria-hidden="true">↻</span> 暂时离开也没关系，用原浏览器打开即可回到座位。</div>
+        <div class="join-footer">仅 Petit ×1 <span>·</span> 自动计分 <span>·</span> 好友同桌</div>
+      </div>
+    </section>
+
+    <section id="game" class="game" hidden>
+      <div class="game-heading"><div><div class="eyebrow">LA TABLE DES AMIS</div><h1>好友牌桌 <span id="round-label">等待开局</span></h1></div><div class="game-heading-actions"><button id="invite-button" class="button quiet">复制邀请链接 ↗</button><button id="leave-button" class="button quiet" title="回到初始界面并保留座位">离开房间</button></div></div>
+      <div class="game-meta"><div class="phase-track"><span id="phase-label">等待入座</span><span id="trick-label"></span></div><div class="timer-wrap"><span id="turn-label">等待好友</span><b id="timer" aria-live="off">—</b></div></div>
+      <div id="offline-banner" class="offline-banner" hidden role="status">连接暂时中断，正在自动返回座位。牌局会按原计时继续。</div>
+      <div class="table-shell">
+        <div class="table-lines" aria-hidden="true"></div>
+        <div id="seats"></div>
+        <div id="table-center" class="table-center"></div>
+        <div id="trick-cards" class="trick-cards"></div>
+        <div class="table-caption">JEU DE TAROT <span>✦</span> PETIT ×1</div>
+      </div>
+      <div class="below-table"><span id="notice" role="status"></span><button id="last-open" class="text-button" disabled>查看上一墩 ↗</button></div>
+      <div id="restart-panel" class="restart-panel" hidden><span id="restart-status" role="status">两人赞成即重新发牌，本局不计分。</span><button id="restart-button" class="button quiet">重开投票</button></div>
+
+      <section id="kitty-panel" class="kitty-panel" hidden aria-label="公开底牌">
+        <div><span class="eyebrow">LE CHIEN</span><h2>六张底牌</h2><p id="kitty-note">先扣原手牌，再收入底牌。</p></div><div id="kitty-cards" class="mini-hand"></div>
+      </section>
+      <p id="exposed-trumps" class="exposed" hidden></p>
+
+      <section id="result" class="result" hidden aria-labelledby="result-title"></section>
+
+      <section class="hand-panel">
+        <div class="hand-heading"><div><h2>我的手牌 <span id="hand-count">0 张</span></h2><p id="hand-hint">入座后等待房主开始。</p></div><span id="my-role" class="pill">等待开局</span></div>
+        <div id="hand" class="hand" aria-label="我的手牌"></div>
+        <div class="action-bar"><span id="selection-note"></span><div id="actions" class="actions"></div></div>
+      </section>
+    </section>
+  </main>
+
+  <footer class="site-footer"><span>一张牌，一个好晚上。</span><span>四人 · 自定义规则</span></footer>
+  <div id="toast" class="toast" role="alert" hidden></div>
+
+  <dialog id="rules-dialog" class="dialog">
+    <div class="dialog-heading"><div><span class="eyebrow">LES RÈGLES</span><h2>这张牌桌的规则</h2></div><button class="icon-button" data-close="rules-dialog" aria-label="关闭玩法说明">×</button></div>
+    <div class="rules-body">
+      <p><b>一对三。</b>第一位叫 Petit 的玩家成为庄家，其余三位组成防守方。四人都不叫则重新发牌。首位行动者随机，随后逆时针出牌。</p>
+      <p><b>先扣后收。</b>底牌公开，庄家从原来的 18 张手牌中扣六张，再收入全部底牌。不能扣 R、将牌 1、21 或愚人；普通可扣花色不足六张时才补扣必要的将牌，并公开这些将牌。</p>
+      <p><b>跟花、缺门出将，不必压大。</b>有首攻花色必须跟；没有则有将出将。即使能压过最大将牌，也能出较小的将牌。愚人可随时出。</p>
+      <p><b>谁来收墩？</b>有将牌则最大的将牌赢；否则首攻花色最大的牌赢。花色牌顺序：R、D、C、V、10 至 1。赢家先出下一墩。</p>
+      <p><b>愚人。</b>首出时由下一张定花色。通常保留给原阵营；若对方收墩，原阵营补 0.5 分。末墩打出则转交对方阵营，大满贯例外。</p>
+      <div class="rule-targets"><span>0 Bout<b>56 分</b></span><span>1 Bout<b>51 分</b></span><span>2 Bout<b>41 分</b></span><span>3 Bout<b>36 分</b></span></div>
+      <p>Bout 指将牌 1、21 和愚人。庄家结算时拥有的 Bout 决定目标，达到即获胜。R/Bout 各 4.5 分，D 3.5、C 2.5、V 1.5，其余 0.5，总牌分 91。</p>
+      <p><b>结算。</b>基础 25 加得失分差；末将奖励 10 分；自然大满贯奖励 200 分。庄家收付三份，防守者各一份，四人成绩总和为零。</p>
+      <p><b>倒计时。</b>叫牌 30 秒、扣牌 90 秒、每次出牌 30 秒。到期自动不叫、合法扣牌或随机合法出牌。全员离线时暂停。</p>
+      <p><b>Petit sec。</b>发牌后仅有将牌 1，既无其他将牌也无愚人时，自动重发。</p>
+    </div>
+  </dialog>
+  <dialog id="last-dialog" class="dialog"><div class="dialog-heading"><h2>上一墩</h2><button class="icon-button" data-close="last-dialog" aria-label="关闭上一墩">×</button></div><div id="last-content"></div></dialog>
+</body>
+</html>

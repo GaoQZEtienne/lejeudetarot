@@ -1,0 +1,12 @@
+.venv
+.tmp
+.git
+.agents
+.codex
+.aws
+data
+artifacts
+__pycache__
+**/__pycache__
+tests
+*.md

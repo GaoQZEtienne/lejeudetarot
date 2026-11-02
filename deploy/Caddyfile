@@ -1,0 +1,4 @@
+# Replace tarot.example.com with a domain pointing to your server.
+tarot.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
