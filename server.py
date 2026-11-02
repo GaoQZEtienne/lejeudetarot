@@ -2,10 +2,12 @@
 import argparse
 import asyncio
 from contextlib import suppress
+from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 import hashlib
 import json
 import logging
+from multiprocessing import get_context
 import os
 from pathlib import Path
 import secrets
@@ -18,7 +20,7 @@ from game.rules import RuleError, discard_options, lead_suit, legal_plays
 from game.state import Game
 from game.storage import Storage
 from game.contracts import CONTRACTS
-from game.bots import POLICIES, RandomPolicy, observation_from_view
+from game.bots import POLICIES, POLICY_LABELS, AdvancedPolicy, NormalPolicy, RandomPolicy, observation_from_view
 
 ROOT = Path(__file__).resolve().parent
 LOG = logging.getLogger('tarot')
@@ -50,6 +52,7 @@ class Room:
         self.bot_tasks = set()
         self.bot_revision = None
         self.bot_delay = (durations or {}).get('bot', .8)
+        self.bot_executor = None
         self.offline_since = [time.time()] * 4
         self.deadline = None
         self.lock = asyncio.Lock()
@@ -171,9 +174,15 @@ class Room:
                 raise RuleError('请选择一位人机')
             self.release_seat(target)
             return
-        policy = payload.get('policy', 'random')
+        policy = payload.get('policy', 'normal')
         if not isinstance(policy, str) or policy not in POLICIES:
             raise RuleError('该人机策略尚未开放')
+        if action == 'bot_set_policy':
+            target = payload.get('seat')
+            if type(target) is not int or target not in range(4) or not self.is_bot(target):
+                raise RuleError('请选择一位人机')
+            self.transaction(lambda: self.players[target].update(policy=policy), reset_clock=False)
+            return
         if action == 'bot_add':
             target = payload.get('seat')
             if target is None:
@@ -233,25 +242,33 @@ class Room:
                     return
                 observation = self.bot_observation(seat)
                 policy = POLICIES[self.players[seat]['policy']]
-            # Future search/model policies use this same bounded worker boundary.
-            # Never hold the room lock or use live Game.data while thinking.
+            # CPU search uses a single bounded process so it cannot hold the
+            # server's GIL. Only the seat's copied observation crosses the boundary.
             try:
-                decision = await asyncio.wait_for(asyncio.to_thread(policy.choose, observation), 2)
+                if isinstance(policy, AdvancedPolicy):
+                    if self.bot_executor is None:
+                        self.bot_executor = ProcessPoolExecutor(max_workers=1, mp_context=get_context('spawn'))
+                    work = asyncio.get_running_loop().run_in_executor(self.bot_executor, policy.choose, observation)
+                else:
+                    work = asyncio.to_thread(policy.choose, observation)
+                decision = await asyncio.wait_for(work, 2)
             except Exception:
-                LOG.exception('Bot decision failed; using random legal fallback.')
+                LOG.exception('Bot decision failed; using a legal fallback.')
                 decision = None
             async with self.lock:
                 if not self.bot_turn_is_current(revision, seat):
                     return
                 try:
                     if decision is None:
-                        decision = RandomPolicy().choose(self.bot_observation(seat))
+                        fallback_policy = NormalPolicy() if self.players[seat]['policy'] == 'advanced' else RandomPolicy()
+                        decision = fallback_policy.choose(self.bot_observation(seat))
                     if decision.action not in ('bid', 'discard', 'play'):
                         raise RuleError('Bot must return a turn action')
                     self.transaction(lambda: self.game.action(seat, decision.action, decision.payload))
                 except Exception:
-                    LOG.exception('Invalid bot action; using random legal fallback.')
-                    fallback = RandomPolicy().choose(self.bot_observation(seat))
+                    LOG.exception('Invalid bot action; using a legal fallback.')
+                    fallback_policy = NormalPolicy() if self.players[seat]['policy'] == 'advanced' else RandomPolicy()
+                    fallback = fallback_policy.choose(self.bot_observation(seat))
                     self.transaction(lambda: self.game.action(seat, fallback.action, fallback.payload))
                 await self.broadcast()
         except asyncio.CancelledError:
@@ -295,6 +312,7 @@ class Room:
             server_time=time.time(), paused=self.paused,
             restart_poll=deepcopy(s['restart_poll']), restart_cooldown=s['restart_cooldown'],
             restart_required=self.restart_thresholds()[0], restart_reject_required=self.restart_thresholds()[1],
+            bot_policies=[dict(id=key, name=POLICY_LABELS[key]) for key in POLICY_LABELS],
             contract=s['contract'], contracts=CONTRACTS, bids=s['bids'],
             kitty_revealed=s['kitty_revealed'], tricks=deepcopy(s['tricks']),
             announcements=deepcopy(s['announcements']), award_epoch=s['award_epoch'],
@@ -427,7 +445,7 @@ class Room:
             return
         if data.get('revision') != self.revision:
             raise RuleError('牌局状态已更新，请按最新画面重新操作')
-        if action in ('bot_add', 'bot_fill', 'bot_remove'):
+        if action in ('bot_add', 'bot_fill', 'bot_remove', 'bot_set_policy'):
             self.manage_bots(seat, action, payload)
             return
         if action == 'start':
@@ -610,6 +628,8 @@ async def lifecycle(app):
     room.cancel_bot_turn()
     if room.bot_tasks:
         await asyncio.gather(*tuple(room.bot_tasks), return_exceptions=True)
+    if room.bot_executor is not None:
+        room.bot_executor.shutdown(wait=False, cancel_futures=True)
     room.storage.close()
 
 

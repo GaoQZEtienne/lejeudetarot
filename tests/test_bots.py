@@ -99,6 +99,8 @@ class BotRoomTests(unittest.IsolatedAsyncioTestCase):
 
     async def act(self, action, payload=None, peer=None):
         peer = peer or self.peers[0]
+        if action in ('bot_add', 'bot_fill'):
+            payload = {'policy': 'random', **(payload or {})}
         await peer.wait(lambda s: s['revision'] == self.room.revision)
         response = await peer.act(action, payload)
         self.assertEqual(response['type'], 'ack', response)
@@ -115,7 +117,7 @@ class BotRoomTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.room.online(3))
         self.assertNotIn('token_hash', self.room.players[3])
         self.assertIsNone(self.room.identify('not-a-bot-token-but-long-enough'))
-        for payload in ({'seat': True}, {'seat': -1}, {'seat': 0}, {'seat': []}, {'seat': 2, 'policy': 'advanced'}, {'seat': 2, 'policy': []}):
+        for payload in ({'seat': True}, {'seat': -1}, {'seat': 0}, {'seat': []}, {'seat': 2, 'policy': 'missing'}, {'seat': 2, 'policy': []}):
             response = await self.peers[0].act('bot_add', payload)
             self.assertEqual(response['type'], 'error', payload)
         await self.act('bot_fill')
@@ -197,6 +199,44 @@ class BotRoomTests(unittest.IsolatedAsyncioTestCase):
         self.room.offline_since[0] = time.time() - 31
         await guest.wait(lambda s: s['host'] == 1)
         self.assertFalse(self.room.is_bot(self.room.host))
+
+    async def test_difficulty_defaults_permissions_and_mixed_policy_round(self):
+        # Omitted policy defaults to normal for actual clients.
+        response = await self.peers[0].act('bot_add')
+        self.assertEqual(response['type'], 'ack')
+        self.assertEqual(self.room.players[1]['policy'], 'normal')
+        await self.act('bot_fill')
+        self.room.players[1]['total2'] = 120
+        self.room.game.data['stats'][1]['wins'] = 2
+        await self.act('bot_set_policy', {'seat': 1, 'policy': 'advanced'})
+        self.assertEqual(self.room.players[1]['total2'], 120)
+        self.assertEqual(self.room.game.data['stats'][1]['wins'], 2)
+        await self.act('bot_set_policy', {'seat': 2, 'policy': 'normal'})
+        self.assertEqual(self.room.storage.load()['players'][1]['policy'], 'advanced')
+        for payload in ({'seat': 0, 'policy': 'normal'}, {'seat': True, 'policy': 'normal'},
+                        {'seat': 1, 'policy': 'missing'}):
+            self.assertEqual((await self.peers[0].act('bot_set_policy', payload))['type'], 'error')
+        await self.act('start')
+        self.assertEqual((await self.peers[0].act('bot_set_policy', {'seat': 1, 'policy': 'normal'}))['type'], 'error')
+        async with asyncio.timeout(45):
+            while self.room.game.data['phase'] != 'finished':
+                state = self.room.game.data
+                if state['turn'] == 0:
+                    view = await self.peers[0].wait(lambda s: s['revision'] == self.room.revision)
+                    if state['phase'] == 'bidding':
+                        await self.act('bid', {'bid': 'pass' if state['contract'] else 'prise'})
+                    elif state['phase'] == 'discard':
+                        await self.act('discard', {'cards': auto_discard(view['hand'])})
+                    else:
+                        await self.act('play', {'card': view['legal'][0]})
+                else:
+                    revision = self.room.revision
+                    await self.peers[0].wait(lambda s: s['revision'] > revision)
+        self.assertEqual(len(self.room.game.data['tricks']), 18)
+        self.assertEqual(sum(self.room.game.data['result']['scores']), 0)
+        await self.act('bot_remove', {'seat': 3})
+        guest = await self.add_human('好友')
+        self.assertEqual((await guest.act('bot_set_policy', {'seat': 1, 'policy': 'normal'}))['type'], 'error')
 
     async def test_worker_does_not_hold_lock_and_stale_result_is_discarded(self):
         entered = threading.Event()

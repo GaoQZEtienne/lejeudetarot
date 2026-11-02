@@ -11,6 +11,7 @@ const SUITS = {S: '♠', H: '♥', D: '♦', C: '♣', T: '✦', F: '✧'};
 const SUIT_NAMES = {S: '黑桃', H: '红心', D: '方块', C: '梅花', T: '将牌', F: '愚人'};
 const PHASES = {lobby: '等待入座', bidding: '叫牌', discard: '庄家扣牌', playing: '出牌', collecting: '收墩', revealing: '底牌揭晓', finished: '本局结算'};
 const POSITIONS = ['bottom', 'right', 'top', 'left'];
+const BOT_NAMES = {random: '基础', normal: '普通', advanced: '进阶'};
 let state = null, ws = null, pending = null, selection = [], selectionKey = '', retryTimer;
 let connected = false, retryCount = 0, toastTimer, clockOffset = 0, token = '';
 let intentionalClose = false;
@@ -231,7 +232,7 @@ function renderSeats() {
       avatar.type = 'button';
       avatar.disabled = !connected || Boolean(pending) || leaving;
       avatar.setAttribute('aria-label', `在第 ${i + 1} 号座位添加人机`);
-      avatar.addEventListener('click', () => send('bot_add', {seat: i}));
+      avatar.addEventListener('click', () => send('bot_add', {seat: i, policy: $('bot-policy').value}));
     }
     seat.append(avatar);
     const info = el('div');
@@ -240,7 +241,7 @@ function renderSeats() {
     if (player) label.append(el('span', 'seat-role', (i === state.seat ? '你 ' : '') + (player.kind === 'bot' ? '人机 ' : '') + (i === state.taker && player.played_this_round ? '庄家' : i === state.host ? '房主' : '')));
     const detail = el('div', 'seat-detail');
     if (!player) detail.textContent = canAddBot ? '点击添加人机' : '空座位';
-    else if (state.phase === 'lobby') detail.textContent = player.kind === 'bot' ? '基础人机 · 已就绪' : player.online ? '已入座' : '离线 · 保留座位';
+    else if (state.phase === 'lobby') detail.textContent = player.kind === 'bot' ? `${BOT_NAMES[player.bot_policy] || '基础'} · 已就绪` : player.online ? '已入座' : '离线 · 保留座位';
     else {
       detail.append(el('span', '', !player.online ? '离线 · ' : state.phase === 'bidding' && state.passed.includes(i) ? '不叫 · ' : `${player.count} 张 · `));
       const history = el('button', 'trick-link', `已收 ${player.tricks} 墩`);
@@ -266,22 +267,36 @@ function renderBots() {
   const humans = state.players.filter(p => p && p.kind !== 'bot');
   const empty = state.players.filter(p => !p).length;
   const host = state.seat === state.host;
+  $('bot-policy-label').hidden = !host;
+  $('bot-policy').disabled = !connected || Boolean(pending) || leaving;
   $('bot-count').textContent = `${humans.length} 真人 · ${bots.length} 人机`;
   $('bot-help').textContent = host ? '点击空座位添加人机，或一键补齐。好友入座前可移除人机。' : '房主可以添加或移除人机，补齐四个座位。';
   if (host) {
-    $('bot-actions').append(actionButton('添加人机', 'bot_add', {}, empty > 0, false), actionButton('补齐人机', 'bot_fill', {}, empty > 0));
+    const payload = {policy: $('bot-policy').value};
+    $('bot-actions').append(actionButton('添加人机', 'bot_add', payload, empty > 0, false), actionButton('补齐人机', 'bot_fill', payload, empty > 0));
   }
   for (const player of bots) {
     const item = el('div', 'bot-roster-item');
     item.append(el('span', '', `🤖 ${player.name}`));
     if (host) {
+      const difficulty = el('select');
+      difficulty.setAttribute('aria-label', `${player.name}的难度`);
+      difficulty.disabled = !connected || Boolean(pending) || leaving;
+      for (const [value, label] of Object.entries(BOT_NAMES)) {
+        const option = el('option', '', label); option.value = value; difficulty.append(option);
+      }
+      difficulty.value = player.bot_policy || 'random';
+      difficulty.addEventListener('change', () => send('bot_set_policy', {seat: player.seat, policy: difficulty.value}));
+      item.append(difficulty);
       const remove = actionButton('移除', 'bot_remove', {seat: player.seat}, true, false);
       remove.setAttribute('aria-label', `移除${player.name}`);
       item.append(remove);
-    }
+    } else item.append(el('span', 'bot-difficulty', BOT_NAMES[player.bot_policy] || '基础'));
     $('bot-roster').append(item);
   }
 }
+
+$('bot-policy').addEventListener('change', () => { if (state) renderBots(); });
 
 function renderTable() {
   const center = $('table-center');

@@ -60,9 +60,9 @@
       </div>
       <div class="below-table"><span id="notice" role="status"></span><button id="last-open" class="text-button" disabled>查看上一墩 ↗</button></div>
       <section id="bot-panel" class="bot-panel" hidden aria-label="人机补位">
-        <div class="bot-panel-heading"><div><h2>人机补位 <span id="bot-count"></span></h2><p id="bot-help"></p></div><div id="bot-actions" class="actions"></div></div>
+        <div class="bot-panel-heading"><div><h2>人机补位 <span id="bot-count"></span></h2><p id="bot-help"></p></div><div class="bot-controls"><label id="bot-policy-label" for="bot-policy">新增难度 <select id="bot-policy"><option value="normal">普通</option><option value="advanced">进阶</option><option value="random">基础</option></select></label><div id="bot-actions" class="actions"></div></div></div>
         <div id="bot-roster" class="bot-roster"></div>
-        <p class="bot-note">当前为基础人机，随机合法行动。普通版与进阶版策略将后续加入。</p>
+        <p class="bot-note">普通：记牌与策略评分 · 进阶：加上限时模拟 · 基础：随机合法行动。由开服电脑计算，无需付费接口。</p>
       </section>
       <div id="restart-panel" class="restart-panel" hidden><span id="restart-status" role="status"></span><div class="actions"><button id="restart-button" class="button quiet">重开投票</button><button id="restart-no" class="button quiet" hidden>拒绝重开</button></div></div>
       <div class="room-tools"><button id="kitty-open" class="button quiet" hidden>查看公开底牌</button><button id="discard-open" class="button quiet" hidden>查看我的扣牌</button><button id="sound-toggle" class="button quiet" aria-pressed="false">开启声音</button><span id="audio-status" role="status"></span></div>
@@ -101,7 +101,7 @@
       <p>Bout 指将牌 1、21 和愚人。庄家结算时拥有的 Bout 决定目标，达到即获胜。R/Bout 各 4.5 分，D 3.5、C 2.5、V 1.5，其余 0.5，总牌分 91。</p>
       <p><b>结算。</b>（基础 25 加得失分差，按胜负取正负，再加末将 ±10）乘合同倍数，再加自然大满贯 ±200。庄家收付三份，防守者各一份，四人成绩总和为零。</p>
       <p><b>倒计时。</b>叫牌 30 秒、扣牌 90 秒、出牌 60 秒，最后 5 秒提示音。到期自动不叫、合法扣牌或随机合法出牌。全员离线时牌局暂停。</p>
-      <p><b>人机。</b>房主可在等待开局或结算后点击空座位添加人机，或一键补齐，也可移除人机供好友入座。局内不能换人。当前基础人机随机合法行动，不读取他人手牌；真人全部离线时暂停。房主仅在真人间转交，局外最后一位真人离开时清空人机。</p>
+      <p><b>人机。</b>房主可在等待开局或结算后选择难度、点击空座位添加人机或一键补齐，逐个调整难度，也可移除人机供好友入座。局内不能换人或改难度。普通版会记牌、评估叫分和扣牌、配合队友；进阶版增加未知牌采样与限时模拟。基础版随机合法行动。人机不读取他人手牌；真人全部离线时暂停。房主仅在真人间转交，局外最后一位真人离开时清空人机。</p>
       <p><b>重开。</b>仅真人投票，限时 20 秒，发起者计一票，两位真人同意即清空积分并回到准备界面；只有一位真人时可直接重开。拒绝票达到无法通过的数量，或超时未通过，则失败并冷却 120 秒。投票不暂停出牌计时。服务重启会清空房间与积分，所有人重新填写昵称。</p>
       <p><b>Petit sec。</b>发牌后仅有将牌 1，既无其他将牌也无愚人时，自动重发。</p>
     </div>

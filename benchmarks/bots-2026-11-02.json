@@ -1,0 +1,36 @@
+{
+  "scope": "Paired fixed-contract deals, four focal seats per deal; tests discard/play, not auction strength or human win rate.",
+  "interval_method": "Approximate 95% normal interval over per-deal mean differences (clustered seat rotations).",
+  "normal_vs_random": {
+    "candidate": "normal",
+    "baseline": "random",
+    "opponents": "random",
+    "seed": 100,
+    "deals": 100,
+    "rotated_pairs": 400,
+    "mean_score_improvement": 43.528,
+    "approximate_cluster_95_interval": [31.19, 55.865],
+    "by_role": {"taker": 137.55, "defense": 12.187}
+  },
+  "advanced_vs_normal_holdout": {
+    "candidate": "advanced",
+    "baseline": "normal",
+    "opponents": "normal",
+    "seed": 1000,
+    "deals": 10,
+    "rotated_pairs": 40,
+    "mean_score_improvement": 20.0,
+    "approximate_cluster_95_interval": [-1.674, 41.674],
+    "by_role": {"taker": 54.9, "defense": 8.367},
+    "budget_seconds": 0.6,
+    "average_search_samples": 18.01,
+    "decision_ms_p95": 600.2,
+    "changed_from_normal": 196
+  },
+  "notes": [
+    "The advanced comparison is a small sample, its interval includes zero; it does not establish a reliable overall strength advantage.",
+    "The two comparisons use different opponents and their score improvements should not be compared with each other.",
+    "Time-bounded search completes a hardware-dependent number of samples, so repeated runs may differ.",
+    "Both comparisons cycle Prise, Garde, Jiedi, Garde sans and Garde contre."
+  ]
+}

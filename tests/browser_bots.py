@@ -43,18 +43,34 @@ async def main():
                     await host.locator('#nickname').fill('独自练牌')
                     await host.locator('#join-button').click()
                     await host.locator('#bot-panel').wait_for(state='visible')
+                    assert await host.locator('#bot-policy').input_value() == 'normal'
+                    await host.locator('#bot-policy').select_option('advanced')
                     await host.get_by_role('button', name='在第 4 号座位添加人机').click()
                     await wait_state(host, 'state.players[3]?.kind === "bot" && !pending')
+                    assert room.players[3]['policy'] == 'advanced'
                     # Empty-seat controls must re-enable after the add acknowledgement.
                     assert await host.get_by_role('button', name='在第 2 号座位添加人机').is_enabled()
+                    await host.locator('#bot-policy').select_option('normal')
                     await host.get_by_role('button', name='添加人机', exact=True).click()
                     await wait_state(host, 'state.players.filter(p => p?.kind === "bot").length === 2 && !pending')
+                    await host.locator('#bot-policy').select_option('random')
                     await host.get_by_role('button', name='补齐人机', exact=True).click()
                     await wait_state(host, 'state.players.every(Boolean) && !pending')
                     assert await host.locator('#bot-count').inner_text() == '1 真人 · 3 人机'
                     assert await host.get_by_role('button', name='补齐人机', exact=True).is_disabled()
                     assert await host.get_by_role('button', name='开始游戏 →', exact=True).is_enabled()
+                    assert [p.get('policy') for p in room.players] == [None, 'normal', 'random', 'advanced']
+                    # Individual changes use the same host-only outside-game protocol.
+                    bot_name = room.players[1]['name']
+                    await host.get_by_role('combobox', name=f'{bot_name}的难度').select_option('advanced')
+                    await wait_state(host, '!pending && state.players[1].bot_policy === "advanced"')
+                    await host.get_by_role('combobox', name=f'{bot_name}的难度').select_option('normal')
+                    await wait_state(host, '!pending && state.players[1].bot_policy === "normal"')
                     await host.screenshot(path=str(artifacts / 'bots-lobby-desktop.png'), full_page=True)
+                    await host.set_viewport_size({'width': 390, 'height': 844})
+                    assert await host.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                    await host.screenshot(path=str(artifacts / 'bots-difficulty-mobile.png'), full_page=True)
+                    await host.set_viewport_size({'width': 1440, 'height': 1050})
 
                     await host.get_by_role('button', name='开始游戏 →', exact=True).click()
                     await wait_state(host, '!pending && state.phase !== "lobby"')
@@ -114,6 +130,8 @@ async def main():
                     await wait_state(host, 'state.players[1]?.kind === "human" && state.players[1].online')
                     assert await guest.locator('#bot-actions button').count() == 0
                     assert await guest.locator('#bot-roster button').count() == 0
+                    assert await guest.locator('#bot-policy-label').is_hidden()
+                    assert await guest.locator('#bot-roster select').count() == 0
                     assert await guest.locator('#bot-count').inner_text() == '2 真人 · 2 人机'
                     assert room.game.data['result'] == old_result
                     assert await guest.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -140,6 +158,7 @@ async def main():
                     assert room.players == [None] * 4
                     assert not errors, errors
                     print(json.dumps({'full_round': True, 'add_remove_fill': True,
+                                      'three_difficulties_and_individual_changes': True,
                                       'single_human_restart_pause_resume': True,
                                       'mobile_replacement_and_two_human_vote': True,
                                       'last_human_clears_bots': True, 'browser_errors': errors}))
