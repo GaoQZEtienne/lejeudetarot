@@ -583,6 +583,41 @@ function showSocialEvent(event) {
   const endX = end.x + end.width / 2 - origin.x - 22, endY = end.y + end.height / 2 - origin.y - 22;
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const destination = `translate(${endX}px, ${endY}px)`;
+  if (event.gift === 'egg') {
+    const flightTime = reduced ? 0 : Math.min(650, remaining * .35);
+    const impactTime = Math.min(1750, remaining - flightTime);
+    const impact = () => {
+      if (!flight.isConnected) return;
+      flight.classList.add('egg-impact');
+      flight.setAttribute('aria-label', `${event.name}投出的鸡蛋在${event.target_name}头像上破碎`);
+      flight.replaceChildren(...['egg-white', 'egg-yolk', 'egg-shell shell-left', 'egg-shell shell-right',
+        'egg-drop drop-one', 'egg-drop drop-two', 'egg-drop drop-three'].map(className => {
+        const part = el('span', className); part.setAttribute('aria-hidden', 'true'); return part;
+      }));
+      flight.animate(reduced ? [
+        {transform: destination, opacity: 1, offset: 0},
+        {transform: destination, opacity: 1, offset: .8},
+        {transform: destination, opacity: 0, offset: 1}
+      ] : [
+        {transform: `${destination} scale(.4)`, opacity: 1, offset: 0},
+        {transform: `${destination} scale(1.2)`, opacity: 1, offset: .12},
+        {transform: `${destination} scale(1)`, opacity: 1, offset: .25},
+        {transform: `${destination} scale(1)`, opacity: 1, offset: .8},
+        {transform: `${destination} scale(1)`, opacity: 0, offset: 1}
+      ], {duration: impactTime, easing: 'ease-out', fill: 'forwards'});
+      expireEffect(flight, impactTime);
+    };
+    if (reduced) impact();
+    else {
+      const animation = flight.animate([
+        {transform: `translate(${startX}px, ${startY}px) scale(.7)`, offset: 0},
+        {transform: `translate(${(startX + endX) / 2}px, ${(startY + endY) / 2 - 50}px) rotate(-25deg)`, offset: .5},
+        {transform: destination, offset: 1}
+      ], {duration: flightTime, easing: 'ease-in', fill: 'forwards'});
+      animation.finished.then(impact).catch(() => flight.remove());
+    }
+    return;
+  }
   flight.animate(reduced ? [{transform: destination, opacity: 1}, {transform: destination, opacity: 0}] : [
     {transform: `translate(${startX}px, ${startY}px) scale(.7)`, opacity: 1, offset: 0},
     {transform: `translate(${(startX + endX) / 2}px, ${(startY + endY) / 2 - 50}px) rotate(-25deg)`, opacity: 1, offset: .25},
