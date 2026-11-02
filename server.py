@@ -18,6 +18,7 @@ from game.rules import RuleError, discard_options, lead_suit, legal_plays
 from game.state import Game
 from game.storage import Storage
 from game.contracts import CONTRACTS
+from game.bots import POLICIES, RandomPolicy, observation_from_view
 
 ROOT = Path(__file__).resolve().parent
 LOG = logging.getLogger('tarot')
@@ -45,6 +46,10 @@ class Room:
         self.durations.update(durations or {})
         self.connections = [set() for _ in range(4)]
         self.close_tasks = set()
+        self.bot_task = None
+        self.bot_tasks = set()
+        self.bot_revision = None
+        self.bot_delay = (durations or {}).get('bot', .8)
         self.offline_since = [time.time()] * 4
         self.deadline = None
         self.lock = asyncio.Lock()
@@ -59,7 +64,18 @@ class Room:
         self.storage.save(self.snapshot())
 
     def online(self, seat):
-        return bool(self.connections[seat])
+        return self.is_bot(seat) or bool(self.connections[seat])
+
+    def is_bot(self, seat):
+        return bool(self.players[seat] and self.players[seat].get('kind') == 'bot')
+
+    def human_seats(self):
+        return [i for i, p in enumerate(self.players) if p and not self.is_bot(i)]
+
+    def restart_thresholds(self):
+        humans = len(self.human_seats())
+        yes = min(2, humans)
+        return yes, humans - yes + 1
 
     def set_deadline(self):
         duration = self.durations.get(self.game.data['phase'])
@@ -93,12 +109,14 @@ class Room:
         if not isinstance(token, str) or not 20 <= len(token) <= 200:
             return None
         digest = token_hash(token)
-        return next((i for i, p in enumerate(self.players) if p and secrets.compare_digest(p['token_hash'], digest)), None)
+        return next((i for i, p in enumerate(self.players)
+                     if p and not self.is_bot(i) and secrets.compare_digest(p['token_hash'], digest)), None)
 
     def freeze_result_players(self):
         result = self.game.data.get('result')
         if result and 'players' not in result:
-            result['players'] = [dict(name=p['name'], total=p['total2'] / 2) for p in self.players]
+            result['players'] = [dict(name=p['name'], total=p['total2'] / 2,
+                                      kind=p.get('kind', 'human')) for p in self.players]
 
     def release_seat(self, seat):
         if self.game.data['phase'] not in OUTSIDE_PHASES:
@@ -109,9 +127,11 @@ class Room:
             self.players[seat] = None
             self.game.data['stats'][seat] = dict(wins=0, taker_wins=0, calls=0, passes=0)
             if self.host == seat:
-                remaining = [i for i, p in enumerate(self.players) if p]
+                remaining = self.human_seats()
                 self.host = next((i for i in remaining if self.online(i)), next(iter(remaining), None))
-            if not any(self.players):
+            if not self.human_seats():
+                self.players = [None] * 4
+                self.host = None
                 self.game = Game()
                 self.social_events = []
         self.transaction(apply, reset_clock=False)
@@ -124,7 +144,7 @@ class Room:
         if any(ord(c) < 32 for c in name):
             raise RuleError('昵称不能包含控制字符')
         if self.game.data['phase'] not in OUTSIDE_PHASES or all(self.players):
-            raise RuleError('四个座位已保留，请使用原浏览器返回房间')
+            raise RuleError('四个座位已保留；请使用原浏览器返回，或请房主在局外移除人机')
         if any(p and p['name'] == name for p in self.players):
             raise RuleError('这个昵称已经入座，请换一个昵称')
         seat = self.players.index(None)
@@ -132,13 +152,112 @@ class Room:
 
         def apply():
             self.freeze_result_players()
-            self.players[seat] = dict(name=name, token_hash=token_hash(token), total2=0,
+            self.players[seat] = dict(name=name, kind='human', token_hash=token_hash(token), total2=0,
                                       joined_round=self.game.data['round'])
             self.social_times[seat] = 0
             if self.host is None:
                 self.host = seat
         self.transaction(apply, reset_clock=False)
         return seat, token
+
+    def manage_bots(self, seat, action, payload):
+        if seat != self.host:
+            raise RuleError('只有房主可以管理人机')
+        if self.game.data['phase'] not in OUTSIDE_PHASES:
+            raise RuleError('请在等待开局或结算后调整人机')
+        if action == 'bot_remove':
+            target = payload.get('seat')
+            if type(target) is not int or target not in range(4) or not self.is_bot(target):
+                raise RuleError('请选择一位人机')
+            self.release_seat(target)
+            return
+        policy = payload.get('policy', 'random')
+        if not isinstance(policy, str) or policy not in POLICIES:
+            raise RuleError('该人机策略尚未开放')
+        if action == 'bot_add':
+            target = payload.get('seat')
+            if target is None:
+                target = next((i for i, p in enumerate(self.players) if p is None), None)
+            if type(target) is not int or target not in range(4) or self.players[target]:
+                raise RuleError('请选择一个空座位')
+            targets = [target]
+        else:
+            targets = [i for i, p in enumerate(self.players) if p is None]
+            if not targets:
+                raise RuleError('没有空座位可补齐')
+
+        def apply():
+            self.freeze_result_players()
+            for target in targets:
+                names = {p['name'] for p in self.players if p}
+                suffix = 1
+                while f'人机{suffix}' in names:
+                    suffix += 1
+                self.players[target] = dict(name=f'人机{suffix}', kind='bot', policy=policy,
+                                             total2=0, joined_round=self.game.data['round'])
+                self.social_times[target] = 0
+        self.transaction(apply, reset_clock=False)
+
+    def bot_observation(self, seat):
+        return observation_from_view(self.view(seat))
+
+    def cancel_bot_turn(self):
+        if self.bot_task and not self.bot_task.done():
+            self.bot_task.cancel()
+        self.bot_task = None
+        self.bot_revision = None
+
+    def bot_turn_is_current(self, revision, seat):
+        s = self.game.data
+        return (not self.paused and self.revision == revision and s['turn'] == seat
+                and self.is_bot(seat) and s['phase'] in ('bidding', 'discard', 'playing'))
+
+    def sync_bot_turn(self):
+        seat = self.game.data['turn']
+        if seat is None or not self.bot_turn_is_current(self.revision, seat):
+            self.cancel_bot_turn()
+            return
+        if self.bot_task and not self.bot_task.done() and self.bot_revision == self.revision:
+            return
+        self.cancel_bot_turn()
+        self.bot_revision = self.revision
+        self.bot_task = asyncio.create_task(self.run_bot_turn(self.revision, seat))
+        self.bot_tasks.add(self.bot_task)
+        self.bot_task.add_done_callback(self.bot_tasks.discard)
+
+    async def run_bot_turn(self, revision, seat):
+        try:
+            await asyncio.sleep(self.bot_delay)
+            async with self.lock:
+                if not self.bot_turn_is_current(revision, seat):
+                    return
+                observation = self.bot_observation(seat)
+                policy = POLICIES[self.players[seat]['policy']]
+            # Future search/model policies use this same bounded worker boundary.
+            # Never hold the room lock or use live Game.data while thinking.
+            try:
+                decision = await asyncio.wait_for(asyncio.to_thread(policy.choose, observation), 2)
+            except Exception:
+                LOG.exception('Bot decision failed; using random legal fallback.')
+                decision = None
+            async with self.lock:
+                if not self.bot_turn_is_current(revision, seat):
+                    return
+                try:
+                    if decision is None:
+                        decision = RandomPolicy().choose(self.bot_observation(seat))
+                    if decision.action not in ('bid', 'discard', 'play'):
+                        raise RuleError('Bot must return a turn action')
+                    self.transaction(lambda: self.game.action(seat, decision.action, decision.payload))
+                except Exception:
+                    LOG.exception('Invalid bot action; using random legal fallback.')
+                    fallback = RandomPolicy().choose(self.bot_observation(seat))
+                    self.transaction(lambda: self.game.action(seat, fallback.action, fallback.payload))
+                await self.broadcast()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOG.exception('Bot turn failed; the normal turn timer remains active.')
 
     def view(self, seat):
         s = self.game.data
@@ -158,6 +277,7 @@ class Room:
         for i, p in enumerate(self.players):
             played = p is not None and p.get('joined_round', -1) < s['round']
             players.append(None if not p else dict(name=p['name'], seat=i, online=self.online(i),
+                kind=p.get('kind', 'human'), bot_policy=p.get('policy') if self.is_bot(i) else None,
                 count=len(s['hands'][i]), total=p['total2'] / 2,
                 played_this_round=played,
                 tricks=sum(t['winner'] == i for t in s['tricks']) if played else 0))
@@ -174,6 +294,7 @@ class Room:
             result=deepcopy(s['result']), notice=s['notice'], deadline=self.deadline,
             server_time=time.time(), paused=self.paused,
             restart_poll=deepcopy(s['restart_poll']), restart_cooldown=s['restart_cooldown'],
+            restart_required=self.restart_thresholds()[0], restart_reject_required=self.restart_thresholds()[1],
             contract=s['contract'], contracts=CONTRACTS, bids=s['bids'],
             kitty_revealed=s['kitty_revealed'], tricks=deepcopy(s['tricks']),
             announcements=deepcopy(s['announcements']), award_epoch=s['award_epoch'],
@@ -205,6 +326,7 @@ class Room:
                 if not any(self.connections):
                     self.paused = True
                     self.deadline = None
+                    self.cancel_bot_turn()
                 await self.broadcast()
 
     def advance_if_due(self):
@@ -263,6 +385,8 @@ class Room:
         self.social_events = [e for e in self.social_events if now - e['time'] < 5]
 
     def handle_action(self, seat, data):
+        if type(seat) is not int or seat not in range(4) or not self.players[seat] or self.is_bot(seat):
+            raise RuleError('只有已入座真人可以发送房间操作')
         action = data.get('action')
         payload = data.get('payload', {})
         if not isinstance(payload, dict):
@@ -288,20 +412,24 @@ class Room:
                 raise RuleError('请发起新投票')
             if poll and (seat in poll['yes'] or seat in poll['no']):
                 return
+            required, reject_required = self.restart_thresholds()
             def vote():
                 if not s['restart_poll']:
                     s['restart_poll'] = dict(id=secrets.token_urlsafe(12), deadline=time.time() + 20, yes=[], no=[])
                 current = s['restart_poll']
                 current[choice].append(seat)
-                if len(current['yes']) >= 2:
+                if len(current['yes']) >= required:
                     self.reset_to_lobby()
-                elif len(current['no']) >= 3:
+                elif len(current['no']) >= reject_required:
                     self.fail_poll()
-            passing = bool(poll and len(poll['yes']) == 1 and choice == 'yes')
+            passing = choice == 'yes' and (len(poll['yes']) if poll else 0) + 1 >= required
             self.transaction(vote, reset_clock=passing)
             return
         if data.get('revision') != self.revision:
             raise RuleError('牌局状态已更新，请按最新画面重新操作')
+        if action in ('bot_add', 'bot_fill', 'bot_remove'):
+            self.manage_bots(seat, action, payload)
+            return
         if action == 'start':
             if seat != self.host:
                 raise RuleError('只有房主可以开始')
@@ -321,12 +449,13 @@ class Room:
                 self.social_events = [e for e in self.social_events if time.time() - e['time'] < 5]
                 if self.game.data['phase'] in ('lobby', 'finished') and self.host is not None:
                     if not self.online(self.host) and time.time() - self.offline_since[self.host] >= 30:
-                        candidate = next((i for i in range(4) if self.online(i)), None)
+                        candidate = next((i for i in self.human_seats() if self.online(i)), None)
                         if candidate is not None:
                             self.transaction(lambda: setattr(self, 'host', candidate), reset_clock=False)
                             changed = True
                 if not self.paused:
                     changed = self.advance_if_due() or changed
+                self.sync_bot_turn()
                 if changed:
                     await self.broadcast()
 
@@ -360,7 +489,9 @@ async def health(request):
 
 async def lobby(request):
     room = request.app[ROOM_KEY]
-    return web.json_response({'occupied': sum(p is not None for p in room.players), 'session_id': room.session_id})
+    return web.json_response({'occupied': sum(p is not None for p in room.players),
+                             'humans': len(room.human_seats()),
+                             'bots': sum(room.is_bot(i) for i in range(4)), 'session_id': room.session_id})
 
 
 async def join(request):
@@ -399,6 +530,7 @@ async def leave(request):
             room.connections[seat].clear()
             if not any(room.connections):
                 room.paused, room.deadline = True, None
+                room.cancel_bot_turn()
             await asyncio.gather(*(room.send(ws, {'type': 'released'}) for ws in departing))
             await room.broadcast()
     await asyncio.gather(*(ws.close(code=4002, message=b'Seat released') for ws in departing))
@@ -475,6 +607,9 @@ async def lifecycle(app):
     task.cancel()
     with suppress(asyncio.CancelledError):
         await task
+    room.cancel_bot_turn()
+    if room.bot_tasks:
+        await asyncio.gather(*tuple(room.bot_tasks), return_exceptions=True)
     room.storage.close()
 
 

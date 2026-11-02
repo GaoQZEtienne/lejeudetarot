@@ -23,7 +23,7 @@ try { intentionalClose = sessionStorage.getItem('tarot-on-home') === '1'; } catc
 function refreshOccupancy() {
   const requestedToken = token;
   fetch('/api/lobby').then(r => r.json()).then(data => {
-    $('occupancy').textContent = `${data.occupied} / 4 已入座`;
+    $('occupancy').textContent = `${data.occupied} / 4 已入座` + (data.bots ? ` · ${data.bots} 人机` : '');
     if (data.session_id && roomSession !== data.session_id) {
       const expired = Boolean(requestedToken && requestedToken === token);
       roomSession = data.session_id;
@@ -98,7 +98,7 @@ async function leaveRoom() {
   } finally {
     leaving = false;
     $('leave-button').disabled = false;
-    if (state) { renderHand(); renderActions(); renderVote(); }
+    if (state) { renderSeats(); renderHand(); renderActions(); renderVote(); renderBots(); }
   }
 }
 
@@ -146,9 +146,11 @@ function send(action, payload = {}) {
   const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
   pending = id;
   ws.send(JSON.stringify({id, action, payload, revision: state.revision}));
+  renderSeats();
   renderHand();
   renderActions();
   renderVote();
+  renderBots();
 }
 
 function connect() {
@@ -185,7 +187,7 @@ function connect() {
     } else if (message.type === 'ack' || message.type === 'error') {
       if (message.id === pending) pending = null;
       if (message.type === 'error') toast(message.message);
-      if (state) { renderHand(); renderActions(); renderVote(); renderExtras(); }
+      if (state) { renderSeats(); renderHand(); renderActions(); renderVote(); renderBots(); renderExtras(); }
     } else if (message.type === 'released') {
       forgetSeat();
     } else if (message.type === 'auth_error') {
@@ -200,7 +202,7 @@ function connect() {
     $('connection').textContent = '连接已断开';
     $('connection').className = 'connection offline';
     $('offline-banner').hidden = !state;
-    if (state) { renderHand(); renderActions(); renderVote(); }
+    if (state) { renderSeats(); renderHand(); renderActions(); renderVote(); renderBots(); }
     if (!intentionalClose && token) {
       retryTimer = setTimeout(connect, Math.min(1000 * 2 ** retryCount++, 10000));
       $('join-error').textContent = '正在恢复连接，请稍候…';
@@ -217,21 +219,28 @@ function renderSeats() {
     seat.classList.toggle('empty', !player);
     seat.classList.toggle('offline', Boolean(player && !player.online));
     const canGift = player && i !== state.seat;
-    const avatar = el(canGift ? 'button' : 'div', 'avatar', player ? player.name.slice(0, 1) : '+');
+    const canAddBot = !player && state.seat === state.host && ['lobby', 'finished'].includes(state.phase);
+    const avatar = el(canGift || canAddBot ? 'button' : 'div', 'avatar', player?.kind === 'bot' ? '🤖' : player ? player.name.slice(0, 1) : '+');
     if (canGift) {
       avatar.type = 'button';
       avatar.setAttribute('aria-label', `给${player.name}送礼物`);
       avatar.setAttribute('aria-haspopup', 'true');
       avatar.addEventListener('click', () => openGiftPicker(i));
     }
+    if (canAddBot) {
+      avatar.type = 'button';
+      avatar.disabled = !connected || Boolean(pending) || leaving;
+      avatar.setAttribute('aria-label', `在第 ${i + 1} 号座位添加人机`);
+      avatar.addEventListener('click', () => send('bot_add', {seat: i}));
+    }
     seat.append(avatar);
     const info = el('div');
     const label = el('div', 'seat-name', player ? player.name : '等待好友');
     label.title = player?.name || '等待好友';
-    if (player) label.append(el('span', 'seat-role', (i === state.seat ? '你 ' : '') + (i === state.taker && player.played_this_round ? '庄家' : i === state.host ? '房主' : '')));
+    if (player) label.append(el('span', 'seat-role', (i === state.seat ? '你 ' : '') + (player.kind === 'bot' ? '人机 ' : '') + (i === state.taker && player.played_this_round ? '庄家' : i === state.host ? '房主' : '')));
     const detail = el('div', 'seat-detail');
-    if (!player) detail.textContent = '空座位';
-    else if (state.phase === 'lobby') detail.textContent = player.online ? '已入座' : '离线 · 保留座位';
+    if (!player) detail.textContent = canAddBot ? '点击添加人机' : '空座位';
+    else if (state.phase === 'lobby') detail.textContent = player.kind === 'bot' ? '基础人机 · 已就绪' : player.online ? '已入座' : '离线 · 保留座位';
     else {
       detail.append(el('span', '', !player.online ? '离线 · ' : state.phase === 'bidding' && state.passed.includes(i) ? '不叫 · ' : `${player.count} 张 · `));
       const history = el('button', 'trick-link', `已收 ${player.tricks} 墩`);
@@ -246,6 +255,34 @@ function renderSeats() {
   });
 }
 
+function renderBots() {
+  if (!state) return;
+  const outside = ['lobby', 'finished'].includes(state.phase);
+  $('bot-panel').hidden = !outside;
+  $('bot-actions').replaceChildren();
+  $('bot-roster').replaceChildren();
+  if (!outside) return;
+  const bots = state.players.filter(p => p?.kind === 'bot');
+  const humans = state.players.filter(p => p && p.kind !== 'bot');
+  const empty = state.players.filter(p => !p).length;
+  const host = state.seat === state.host;
+  $('bot-count').textContent = `${humans.length} 真人 · ${bots.length} 人机`;
+  $('bot-help').textContent = host ? '点击空座位添加人机，或一键补齐。好友入座前可移除人机。' : '房主可以添加或移除人机，补齐四个座位。';
+  if (host) {
+    $('bot-actions').append(actionButton('添加人机', 'bot_add', {}, empty > 0, false), actionButton('补齐人机', 'bot_fill', {}, empty > 0));
+  }
+  for (const player of bots) {
+    const item = el('div', 'bot-roster-item');
+    item.append(el('span', '', `🤖 ${player.name}`));
+    if (host) {
+      const remove = actionButton('移除', 'bot_remove', {seat: player.seat}, true, false);
+      remove.setAttribute('aria-label', `移除${player.name}`);
+      item.append(remove);
+    }
+    $('bot-roster').append(item);
+  }
+}
+
 function renderTable() {
   const center = $('table-center');
   center.replaceChildren();
@@ -257,7 +294,7 @@ function renderTable() {
     const occupied = state.players.filter(Boolean).length;
     const online = state.players.filter(p => p?.online).length;
     let title, detail;
-    if (state.phase === 'lobby') { title = `${occupied} / 4 已入座`; detail = online === 4 ? '四人到齐，等待房主开始' : '把同一个链接分享给好友'; }
+    if (state.phase === 'lobby') { title = `${occupied} / 4 已入座`; detail = online === 4 ? '四人到齐，等待房主开始' : '邀请好友，或由房主添加人机'; }
     else if (state.phase === 'bidding') { title = state.contract ? contractName(state.contract) : '叫分，还是不叫？'; detail = `等待 ${name(state.turn)} 叫分`; }
     else if (state.phase === 'discard') { title = '庄家正在扣牌'; detail = '从原手牌中扣六张，再收入底牌'; }
     else if (state.phase === 'finished') { title = '本局结束'; detail = '最后一张落定，看看这局的收获'; }
@@ -376,9 +413,11 @@ function renderVote() {
   const voted = poll && [...poll.yes, ...poll.no].includes(state.seat);
   const now = (Date.now() + clockOffset) / 1000;
   const cooldown = Math.max(0, Math.ceil(state.restart_cooldown - now));
+  const required = state.restart_required || 2;
+  const rejected = state.restart_reject_required || 3;
   $('restart-panel').hidden = !active;
-  $('restart-status').textContent = poll ? `重开剩余 ${Math.max(0, Math.ceil(poll.deadline - now))}s · 同意 ${poll.yes.length}/2（${poll.yes.map(name).join('、') || '无'}）· 拒绝 ${poll.no.length}/3（${poll.no.map(name).join('、') || '无'}）` : cooldown ? `投票未通过，${cooldown}s 后可再次发起。` : '20 秒内两人同意即回准备界面，并清空积分榜。';
-  $('restart-button').textContent = voted ? (poll.yes.includes(state.seat) ? '已同意' : '已拒绝') : poll ? '同意重开' : '重开投票';
+  $('restart-status').textContent = poll ? `重开剩余 ${Math.max(0, Math.ceil(poll.deadline - now))}s · 同意 ${poll.yes.length}/${required}（${poll.yes.map(name).join('、') || '无'}）· 拒绝 ${poll.no.length}/${rejected}（${poll.no.map(name).join('、') || '无'}）` : cooldown ? `投票未通过，${cooldown}s 后可再次发起。` : required === 1 ? '当前只有一位真人，可直接重开并清空积分榜。' : '20 秒内两位真人同意即回准备界面，并清空积分榜；人机不参与投票。';
+  $('restart-button').textContent = voted ? (poll.yes.includes(state.seat) ? '已同意' : '已拒绝') : poll ? '同意重开' : required === 1 ? '重新开局' : '重开投票';
   $('restart-button').disabled = !connected || Boolean(pending) || leaving || voted || cooldown > 0;
   $('restart-no').hidden = !poll;
   $('restart-no').disabled = !connected || Boolean(pending) || leaving || voted;
@@ -396,7 +435,7 @@ function render() {
   $('trick-label').textContent = ['playing', 'collecting'].includes(state.phase) ? `${state.trick_number} / 18 墩` + (state.lead ? ' · ' + SUIT_NAMES[state.lead] : '') : '';
   $('turn-label').textContent = state.turn === null ? state.phase === 'collecting' ? '收墩展示' : state.phase === 'revealing' ? '结算前亮牌' : '' : state.turn === state.seat ? '轮到你了' : name(state.turn) + ' 的回合';
   $('notice').textContent = state.notice;
-  renderSeats(); renderTable(); renderHand(); renderActions(); renderResult(); renderVote();
+  renderSeats(); renderTable(); renderHand(); renderActions(); renderResult(); renderVote(); renderBots();
   renderExtras(); syncMusic(); receiveAwards();
   if (state.phase === 'revealing') {
     closeTablePickers();
