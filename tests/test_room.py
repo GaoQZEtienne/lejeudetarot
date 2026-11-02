@@ -3,6 +3,7 @@ import json
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -368,6 +369,59 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 206)
             self.assertEqual(len(await response.read()), 1024)
         self.assertEqual((await self.client.get('/musics/unknown.mp3')).status, 404)
+
+    async def test_hidden_kitty_reveals_for_ten_seconds_before_settlement(self):
+        for contract in ['sans', 'contre']:
+            async with self.room.lock:
+                self.room.transaction(self.room.reset_to_lobby)
+                await self.room.broadcast()
+            await self.start()
+            await self.act(self.room.game.data['turn'], 'bid', {'bid': contract})
+            async with self.room.lock:
+                while self.room.game.data['phase'] != 'revealing':
+                    self.assertIsNone(self.room.game.data['result'])
+                    for seat in range(4):
+                        self.assertEqual(self.room.view(seat)['kitty'], [])
+                    self.room.transaction(self.room.game.timeout)
+                await self.room.broadcast()
+            for peer in self.peers:
+                await peer.wait(lambda s: s['phase'] == 'revealing')
+                self.assertEqual(len(peer.state['kitty']), 6)
+                self.assertEqual(peer.state['completed'], 18)
+                self.assertIsNone(peer.state['result'])
+                self.assertTrue(all(p['total'] == 0 for p in peer.state['players']))
+            deadline = self.room.deadline
+            self.assertAlmostEqual(deadline - time.time(), 10, delta=1)
+            await self.peers[0].close()
+            self.peers[0] = await self.connect(self.tokens[0])
+            self.assertEqual(self.peers[0].state['phase'], 'revealing')
+            self.assertEqual(self.room.deadline, deadline)
+            async with self.room.lock:
+                with patch('server.time.time', return_value=deadline - .01):
+                    self.assertFalse(self.room.advance_if_due())
+                    self.assertIsNone(self.room.game.data['result'])
+                with patch('server.time.time', return_value=deadline + .01):
+                    self.assertTrue(self.room.advance_if_due())
+                self.assertEqual(self.room.game.data['phase'], 'finished')
+                result = self.room.game.data['result']
+                self.assertEqual([p['total2'] / 2 for p in self.room.players], result['scores'])
+                before = [p['total2'] for p in self.room.players]
+                self.assertFalse(self.room.advance_if_due())
+                self.assertEqual([p['total2'] for p in self.room.players], before)
+                await self.room.broadcast()
+
+    async def test_social_events_expire_without_history(self):
+        await self.act(0, 'chat', {'text': '放心出'})
+        self.assertNotIn('social_events', self.room.snapshot())
+        async with self.room.lock:
+            self.room.social_events[0]['time'] -= 6
+            self.assertEqual(self.room.view(1)['social_events'], [])
+        async with asyncio.timeout(2):
+            while self.room.social_events:
+                await asyncio.sleep(.03)
+        twin = await self.connect(self.tokens[1])
+        self.assertEqual(twin.state['social_events'], [])
+        await twin.close()
 
     async def test_private_discard_and_award_names(self):
         await self.start()

@@ -51,11 +51,16 @@
         <div id="seats"></div>
         <div id="table-center" class="table-center"></div>
         <div id="trick-cards" class="trick-cards"></div>
+        <div id="table-effects" class="table-effects" aria-live="polite"></div>
+        <button id="chat-open" class="table-chat-button" aria-expanded="false" aria-controls="chat-picker">💬 快捷语</button>
+        <div id="chat-picker" class="table-picker chat-picker" hidden><div class="picker-heading"><b>快捷语</b><button id="chat-close" class="picker-close" aria-label="关闭快捷语">×</button></div><div id="quick-chat" class="quick-chat"></div></div>
+        <div id="gift-picker" class="table-picker gift-picker" hidden role="group" aria-labelledby="gift-label"><div class="picker-heading"><b id="gift-label">送给好友</b><button id="gift-close" class="picker-close" aria-label="关闭礼物选择">×</button></div><div class="gift-options"><button id="flower-button" class="button quiet">💐 鲜花</button><button id="egg-button" class="button quiet">🥚 鸡蛋</button></div></div>
+        <div id="reveal-panel" class="reveal-panel" hidden aria-label="结算前亮底牌"><h2>底牌揭晓</h2><div id="reveal-cards" class="mini-hand"></div><p>展示结束后结算 · <b id="reveal-timer">10s</b></p></div>
         <div class="table-caption">JEU DE TAROT <span>✦</span> <span id="contract-label">等待叫分</span></div>
       </div>
       <div class="below-table"><span id="notice" role="status"></span><button id="last-open" class="text-button" disabled>查看上一墩 ↗</button></div>
       <div id="restart-panel" class="restart-panel" hidden><span id="restart-status" role="status"></span><div class="actions"><button id="restart-button" class="button quiet">重开投票</button><button id="restart-no" class="button quiet" hidden>拒绝重开</button></div></div>
-      <div class="room-tools"><button id="history-open" class="button quiet">查看已收的墩</button><button id="kitty-open" class="button quiet" hidden>查看公开底牌</button><button id="discard-open" class="button quiet" hidden>查看我的扣牌</button><button id="sound-toggle" class="button quiet" aria-pressed="false">开启声音</button><span id="audio-status" role="status"></span></div>
+      <div class="room-tools"><button id="kitty-open" class="button quiet" hidden>查看公开底牌</button><button id="discard-open" class="button quiet" hidden>查看我的扣牌</button><button id="sound-toggle" class="button quiet" aria-pressed="false">开启声音</button><span id="audio-status" role="status"></span></div>
 
       <section id="kitty-panel" class="kitty-panel" hidden aria-label="公开底牌">
         <div><span class="eyebrow">LE CHIEN</span><h2>六张底牌</h2><p id="kitty-note">先扣原手牌，再收入底牌。</p></div><div id="kitty-cards" class="mini-hand"></div>
@@ -69,9 +74,8 @@
         <div id="hand" class="hand" aria-label="我的手牌"></div>
         <div class="action-bar"><span id="selection-note"></span><div id="actions" class="actions"></div></div>
       </section>
-      <section class="room-extras" aria-label="积分与互动">
+      <section class="room-extras" aria-label="积分榜">
         <div class="scoreboard"><h2>积分榜</h2><div id="scoreboard"></div></div>
-        <div class="social-panel"><h2>同桌闲聊</h2><div id="quick-chat" class="quick-chat"></div><div class="gift-controls"><label for="gift-target">送给</label><select id="gift-target" aria-label="赠送对象"></select><button id="flower-button" class="button quiet">💐 鲜花</button><button id="egg-button" class="button quiet">🥚 鸡蛋</button></div><div id="social-log" class="social-log" role="log" aria-live="polite"></div></div>
       </section>
     </section>
   </main>
@@ -84,7 +88,7 @@
     <div class="rules-body">
       <p><b>一对三与循环叫分。</b>Prise ×1、Garde ×2、Jiedi ×3、Garde sans ×4、Garde contre ×6。只能加叫更高合同，不叫后退出本轮竞价；其余人均退出时最高者当庄，叫到 ×6 立即定庄。四人均不叫则重发。首位行动者随机，随后逆时针。</p>
       <p><b>先扣后收。</b>底牌公开，庄家从原来的 18 张手牌中扣六张，再收入全部底牌。不能扣 R、将牌 1、21 或愚人；普通可扣花色不足六张时才补扣必要的将牌，并公开这些将牌。</p>
-      <p><b>合同与底牌。</b>Prise、Garde 的扣牌计入庄家。Jiedi 同样亮牌换牌，但扣下的六张归最后一墩赢家。Garde sans 不亮不换，隐藏底牌计入庄家；Garde contre 不亮不换，隐藏底牌计入防守方。隐藏底牌只在结算后揭晓。</p>
+      <p><b>合同与底牌。</b>Prise、Garde 的扣牌计入庄家。Jiedi 同样亮牌换牌，但扣下的六张归最后一墩赢家。Garde sans 不亮不换，隐藏底牌计入庄家；Garde contre 不亮不换，隐藏底牌计入防守方。×4、×6 的底牌在最后一墩收完后向所有人展示 10 秒，再结算分数和胜负。</p>
       <p><b>跟花、缺门出将，不必压大。</b>有首攻花色必须跟；没有则有将出将。即使能压过最大将牌，也能出较小的将牌。愚人可随时出。</p>
       <p><b>谁来收墩？</b>有将牌则最大的将牌赢；否则首攻花色最大的牌赢。花色牌顺序：R、D、C、V、10 至 1。赢家先出下一墩。</p>
       <p><b>愚人。</b>首出时由下一张定花色，包括末墩在内始终保留给出牌者；若对方阵营收墩，补偿对方 0.5 分。同阵营玩家之间的补牌不改变阵营得分。保留愚人末墩大满贯例外。</p>

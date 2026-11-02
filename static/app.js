@@ -9,7 +9,7 @@ const el = (tag, className = '', text = '') => {
 };
 const SUITS = {S: '♠', H: '♥', D: '♦', C: '♣', T: '✦', F: '✧'};
 const SUIT_NAMES = {S: '黑桃', H: '红心', D: '方块', C: '梅花', T: '将牌', F: '愚人'};
-const PHASES = {lobby: '等待入座', bidding: '叫牌', discard: '庄家扣牌', playing: '出牌', collecting: '收墩', finished: '本局结算'};
+const PHASES = {lobby: '等待入座', bidding: '叫牌', discard: '庄家扣牌', playing: '出牌', collecting: '收墩', revealing: '底牌揭晓', finished: '本局结算'};
 const POSITIONS = ['bottom', 'right', 'top', 'left'];
 let state = null, ws = null, pending = null, selection = [], selectionKey = '', retryTimer;
 let connected = false, retryCount = 0, toastTimer, clockOffset = 0, token = '';
@@ -44,6 +44,8 @@ function showHome() {
   connected = false;
   pending = null;
   state = null;
+  clearTableEffects();
+  closeTablePickers();
   syncMusic();
   awardQueue = [];
   selection = [];
@@ -214,13 +216,30 @@ function renderSeats() {
     seat.classList.toggle('active', state.turn === i);
     seat.classList.toggle('empty', !player);
     seat.classList.toggle('offline', Boolean(player && !player.online));
-    seat.append(el('div', 'avatar', player ? player.name.slice(0, 1) : '+'));
+    const canGift = player && i !== state.seat;
+    const avatar = el(canGift ? 'button' : 'div', 'avatar', player ? player.name.slice(0, 1) : '+');
+    if (canGift) {
+      avatar.type = 'button';
+      avatar.setAttribute('aria-label', `给${player.name}送礼物`);
+      avatar.setAttribute('aria-haspopup', 'true');
+      avatar.addEventListener('click', () => openGiftPicker(i));
+    }
+    seat.append(avatar);
     const info = el('div');
     const label = el('div', 'seat-name', player ? player.name : '等待好友');
     label.title = player?.name || '等待好友';
     if (player) label.append(el('span', 'seat-role', (i === state.seat ? '你 ' : '') + (i === state.taker && player.played_this_round ? '庄家' : i === state.host ? '房主' : '')));
-    info.append(label, el('div', 'seat-detail', !player ? '空座位' : !player.online ? '离线 · 保留座位' :
-      state.phase === 'lobby' ? '已入座' : state.phase === 'bidding' && state.passed.includes(i) ? '不叫' : `${player.count} 张 · ${player.tricks} 墩`));
+    const detail = el('div', 'seat-detail');
+    if (!player) detail.textContent = '空座位';
+    else if (state.phase === 'lobby') detail.textContent = player.online ? '已入座' : '离线 · 保留座位';
+    else {
+      detail.append(el('span', '', !player.online ? '离线 · ' : state.phase === 'bidding' && state.passed.includes(i) ? '不叫 · ' : `${player.count} 张 · `));
+      const history = el('button', 'trick-link', `已收 ${player.tricks} 墩`);
+      history.setAttribute('aria-label', `查看${player.name}已收的墩`);
+      history.addEventListener('click', () => openInspection('tricks', i));
+      detail.append(history);
+    }
+    info.append(label, detail);
     seat.append(info);
     if (player) seat.dataset.seat = String(i);
     $('seats').append(seat);
@@ -231,7 +250,9 @@ function renderTable() {
   const center = $('table-center');
   center.replaceChildren();
   $('trick-cards').replaceChildren();
-  center.hidden = state.trick.length > 0;
+  center.hidden = state.trick.length > 0 || state.phase === 'revealing';
+  $('reveal-panel').hidden = state.phase !== 'revealing';
+  $('reveal-cards').replaceChildren(...(state.phase === 'revealing' ? state.kitty.map(c => cardElement(c)) : []));
   if (!center.hidden) {
     const occupied = state.players.filter(Boolean).length;
     const online = state.players.filter(p => p?.online).length;
@@ -279,11 +300,12 @@ function renderHand() {
     });
     $('hand').append(node);
   }
-  if (!state.hand.length) $('hand').append(el('p', 'empty-hand', state.phase === 'finished' ? '本局手牌已出完' : '等待发牌，祝你有一手好牌。'));
+  if (!state.hand.length) $('hand').append(el('p', 'empty-hand', ['revealing', 'finished'].includes(state.phase) ? '本局手牌已出完' : '等待发牌，祝你有一手好牌。'));
   $('hand').scrollLeft = scroll;
   $('hand-count').textContent = state.hand.length + ' 张';
   $('my-role').textContent = !state.players[state.seat]?.played_this_round ? '等待开局' : state.taker === null ? '尚未定庄' : state.taker === state.seat ? '庄家 · 一对三' : '防守方';
   $('hand-hint').textContent = !connected ? '正在重连，恢复后即可继续操作。' : isDiscard ? '只能选原手牌；国王、Bout 与非必要将牌不可扣。' :
+    state.phase === 'revealing' ? '最后一墩已收完，亮底牌结束后结算。' :
     state.phase === 'playing' && state.turn === state.seat ? '亮起的牌可以出，点选后确认。出将无需压大。' :
     state.phase === 'bidding' ? '看看手牌，决定是否成为庄家。' : state.phase === 'finished' ? '结算已保存，等待房主开始下一局。' : '轮到你时，可出的牌会亮起。';
 }
@@ -296,7 +318,7 @@ function renderActions() {
     if (state.seat === state.host) $('actions').append(actionButton(state.phase === 'finished' ? '开始下一局 →' : '开始游戏 →', 'start', {}, ready));
     note = ready ? (state.seat === state.host ? '四人到齐，可以开始。' : '等待房主开始。') : '四位玩家全部在线后即可开始。';
   } else if (state.turn !== state.seat) {
-    note = state.turn === null ? '正在收墩…' : `等待 ${name(state.turn)} 操作`;
+    note = state.phase === 'revealing' ? '底牌展示中，结束后自动结算。' : state.turn === null ? '正在收墩…' : `等待 ${name(state.turn)} 操作`;
   } else if (state.phase === 'bidding') {
     note = '叫牌后，你将独自对抗另外三位。';
     $('actions').append(actionButton('不叫', 'bid', {bid: 'pass'}, true, false));
@@ -372,10 +394,16 @@ function render() {
   $('round-label').textContent = state.round ? `第 ${state.round} 次发牌` : '等待开局';
   $('phase-label').textContent = PHASES[state.phase];
   $('trick-label').textContent = ['playing', 'collecting'].includes(state.phase) ? `${state.trick_number} / 18 墩` + (state.lead ? ' · ' + SUIT_NAMES[state.lead] : '') : '';
-  $('turn-label').textContent = state.turn === null ? state.phase === 'collecting' ? '收墩展示' : '' : state.turn === state.seat ? '轮到你了' : name(state.turn) + ' 的回合';
+  $('turn-label').textContent = state.turn === null ? state.phase === 'collecting' ? '收墩展示' : state.phase === 'revealing' ? '结算前亮牌' : '' : state.turn === state.seat ? '轮到你了' : name(state.turn) + ' 的回合';
   $('notice').textContent = state.notice;
   renderSeats(); renderTable(); renderHand(); renderActions(); renderResult(); renderVote();
   renderExtras(); syncMusic(); receiveAwards();
+  if (state.phase === 'revealing') {
+    closeTablePickers();
+    $('inspect-dialog').close();
+    $('last-dialog').close();
+    $('award-dialog').close();
+  }
   if ($('inspect-dialog').open) renderInspection();
   $('contract-label').textContent = state.contract ? contractName(state.contract) : '等待叫分';
   $('kitty-open').hidden = !state.kitty.length;
@@ -391,10 +419,11 @@ function render() {
 
 function updateClock() {
   renderVote();
-  if (!state?.deadline) { $('timer').textContent = '—'; return; }
+  if (!state?.deadline) { $('timer').textContent = '—'; $('reveal-timer').textContent = state?.paused ? '已暂停' : '—'; return; }
   const remaining = Math.max(0, Math.ceil((state.deadline * 1000 - Date.now() - clockOffset) / 1000));
   $('timer').textContent = remaining + 's';
-  $('timer').classList.toggle('urgent', remaining <= 8 && state.phase !== 'collecting');
+  $('reveal-timer').textContent = remaining + 's';
+  $('timer').classList.toggle('urgent', remaining <= 8 && ['bidding', 'discard', 'playing'].includes(state.phase));
   if (connected && ['bidding', 'discard', 'playing'].includes(state.phase) && remaining > 0 && remaining <= 5) {
     const key = `${state.round}:${state.deadline}:${remaining}`;
     if (key !== lastBeep) { lastBeep = key; countdownBeep(remaining); }
@@ -462,7 +491,7 @@ function soundLabel() {
   $('sound-toggle').setAttribute('aria-pressed', String(soundEnabled && audioUnlocked));
 }
 function syncMusic() {
-  const track = !state ? '' : state.phase === 'finished' ? 'jiesuanyinyue' : ['playing', 'collecting'].includes(state.phase) ? 'seikobeatclub' : 'leschampselysee';
+  const track = !state ? '' : state.phase === 'finished' ? 'jiesuanyinyue' : ['playing', 'collecting', 'revealing'].includes(state.phase) ? 'seikobeatclub' : 'leschampselysee';
   if (track !== currentTrack) {
     music.pause();
     currentTrack = track;
@@ -506,7 +535,63 @@ function countdownBeep(seconds) {
   oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
 }
 
-let socialSeen = 0, socialSession = '';
+let socialSeen = 0, socialSession = '', giftTarget = null;
+const effectTimers = new Set();
+function clearTableEffects() {
+  effectTimers.forEach(clearTimeout); effectTimers.clear();
+  $('table-effects').replaceChildren();
+}
+function expireEffect(node, milliseconds) {
+  const timer = setTimeout(() => { node.remove(); effectTimers.delete(timer); }, milliseconds);
+  effectTimers.add(timer);
+}
+function closeTablePickers() {
+  $('gift-picker').hidden = true; $('chat-picker').hidden = true;
+  $('chat-open').setAttribute('aria-expanded', 'false');
+  giftTarget = null;
+}
+function openGiftPicker(seat) {
+  closeTablePickers();
+  if (!state?.players[seat] || seat === state.seat) return;
+  giftTarget = seat;
+  $('gift-label').textContent = `送给 ${name(seat)}`;
+  $('gift-picker').className = `table-picker gift-picker ${pos(seat)}`;
+  $('gift-picker').hidden = false;
+  $('flower-button').focus({preventScroll: true});
+}
+function showSocialEvent(event) {
+  const remaining = 5000 - (Date.now() + clockOffset - event.time * 1000);
+  if (remaining <= 0) return;
+  const layer = $('table-effects');
+  if (event.kind === 'chat') {
+    layer.querySelector(`.speech-bubble[data-speaker="${event.seat}"]`)?.remove();
+    const bubble = el('div', `speech-bubble ${pos(event.seat)}`, event.text);
+    bubble.dataset.speaker = String(event.seat);
+    bubble.setAttribute('aria-label', `${event.name}说：${event.text}`);
+    layer.append(bubble);
+    expireEffect(bubble, remaining);
+    return;
+  }
+  const from = document.querySelector(`[data-seat="${event.seat}"] .avatar`);
+  const to = document.querySelector(`[data-seat="${event.target}"] .avatar`);
+  if (!from || !to) return;
+  const origin = layer.getBoundingClientRect(), start = from.getBoundingClientRect(), end = to.getBoundingClientRect();
+  const flight = el('span', 'gift-flight', event.gift === 'flower' ? '💐' : '🥚');
+  flight.setAttribute('aria-label', `${event.name}向${event.target_name}${event.gift === 'flower' ? '送鲜花' : '投鸡蛋'}`);
+  layer.append(flight);
+  const startX = start.x + start.width / 2 - origin.x - 22, startY = start.y + start.height / 2 - origin.y - 22;
+  const endX = end.x + end.width / 2 - origin.x - 22, endY = end.y + end.height / 2 - origin.y - 22;
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const destination = `translate(${endX}px, ${endY}px)`;
+  flight.animate(reduced ? [{transform: destination, opacity: 1}, {transform: destination, opacity: 0}] : [
+    {transform: `translate(${startX}px, ${startY}px) scale(.7)`, opacity: 1, offset: 0},
+    {transform: `translate(${(startX + endX) / 2}px, ${(startY + endY) / 2 - 50}px) rotate(-25deg)`, opacity: 1, offset: .25},
+    {transform: `${destination} scale(1.3)`, opacity: 1, offset: .5},
+    {transform: `${destination} scale(1)`, opacity: 1, offset: .8},
+    {transform: `${destination} scale(1.1)`, opacity: 0, offset: 1}
+  ], {duration: Math.min(2400, remaining), easing: 'ease-out', fill: 'forwards'});
+  expireEffect(flight, Math.min(2400, remaining));
+}
 function renderExtras() {
   $('scoreboard').replaceChildren();
   [...state.players].filter(Boolean).sort((a, b) => b.total - a.total).forEach((p, rank) => {
@@ -514,29 +599,36 @@ function renderExtras() {
     row.append(el('span', '', `${rank + 1}. ${p.name}`), el('b', '', signed(p.total)));
     $('scoreboard').append(row);
   });
-  $('quick-chat').replaceChildren(...state.quick_chats.map(text => actionButton(text, 'chat', {text}, true, false)));
-  const target = $('gift-target').value;
-  $('gift-target').replaceChildren(...state.players.flatMap((p, i) => {
-    if (!p || i === state.seat) return [];
-    const option = el('option', '', p.name); option.value = String(i); return [option];
+  $('quick-chat').replaceChildren(...state.quick_chats.map(text => {
+    const button = actionButton(text, 'chat', {text}, true, false);
+    button.addEventListener('click', closeTablePickers);
+    return button;
   }));
-  if ([...$('gift-target').options].some(o => o.value === target)) $('gift-target').value = target;
-  for (const id of ['flower-button', 'egg-button']) $(id).disabled = !connected || Boolean(pending) || !$('gift-target').options.length;
-  $('social-log').replaceChildren(...state.social_events.slice(-8).map(event => el('p', '', event.kind === 'chat' ? `${event.name}：${event.text}` : `${event.name} ${event.gift === 'flower' ? '💐 送鲜花给' : '🥚 向…投鸡蛋：'} ${event.target_name}`)));
-  $('social-log').scrollTop = $('social-log').scrollHeight;
-  if (socialSession !== state.session_id) { socialSeen = 0; socialSession = state.session_id; }
+  if (giftTarget !== null && !state.players[giftTarget]) closeTablePickers();
+  for (const id of ['flower-button', 'egg-button']) $(id).disabled = !connected || Boolean(pending) || leaving;
+  $('chat-open').disabled = !connected || leaving;
+  if (socialSession !== state.session_id) { socialSeen = 0; socialSession = state.session_id; clearTableEffects(); }
   for (const event of state.social_events) {
     if (event.id <= socialSeen) continue;
     socialSeen = event.id;
-    if (event.kind === 'gift' && (Date.now() + clockOffset) / 1000 - event.time < 5) {
-      const seat = document.querySelector(`[data-seat="${event.target}"]`);
-      const burst = el('span', 'gift-burst', event.gift === 'flower' ? '💐' : '🥚');
-      if (seat) { seat.append(burst); setTimeout(() => burst.remove(), 2400); }
-    }
+    showSocialEvent(event);
   }
 }
-$('flower-button').addEventListener('click', () => send('gift', {target: Number($('gift-target').value), gift: 'flower'}));
-$('egg-button').addEventListener('click', () => send('gift', {target: Number($('gift-target').value), gift: 'egg'}));
+for (const [id, gift] of [['flower-button', 'flower'], ['egg-button', 'egg']]) {
+  $(id).addEventListener('click', () => { if (giftTarget !== null) send('gift', {target: giftTarget, gift}); closeTablePickers(); });
+}
+$('chat-open').addEventListener('click', () => {
+  const opening = $('chat-picker').hidden;
+  closeTablePickers(); $('chat-picker').hidden = !opening;
+  $('chat-open').setAttribute('aria-expanded', String(opening));
+  if (opening) $('quick-chat').querySelector('button')?.focus({preventScroll: true});
+});
+$('chat-close').addEventListener('click', closeTablePickers);
+$('gift-close').addEventListener('click', closeTablePickers);
+document.addEventListener('click', event => {
+  if (!event.target.closest('.table-picker, .avatar, #chat-open')) closeTablePickers();
+});
+document.addEventListener('keydown', event => { if (event.key === 'Escape') closeTablePickers(); });
 
 let inspectMode = 'tricks', inspectSeat = 0;
 function renderInspection() {
@@ -580,8 +672,11 @@ function renderInspection() {
   }
   if (!content.children.length) content.append(el('p', 'result-note', '这位玩家尚未收墩。'));
 }
-for (const [id, mode] of [['history-open', 'tricks'], ['kitty-open', 'kitty'], ['discard-open', 'discard']]) {
-  $(id).addEventListener('click', () => { inspectMode = mode; inspectSeat = state.seat; renderInspection(); $('inspect-dialog').showModal(); });
+function openInspection(mode, seat = state.seat) {
+  inspectMode = mode; inspectSeat = seat; renderInspection(); $('inspect-dialog').showModal();
+}
+for (const [id, mode] of [['kitty-open', 'kitty'], ['discard-open', 'discard']]) {
+  $(id).addEventListener('click', () => openInspection(mode));
 }
 
 const AWARDS = {
@@ -603,7 +698,7 @@ function receiveAwards() {
   showNextAward();
 }
 function showNextAward() {
-  if ($('award-dialog').open || !awardQueue.length || !state) return;
+  if ($('award-dialog').open || !awardQueue.length || !state || state.phase === 'revealing') return;
   const event = awardQueue.shift(), definition = AWARDS[event.kind];
   if (!definition) return;
   $('award-emoji').textContent = definition[0]; $('award-title').textContent = definition[1];

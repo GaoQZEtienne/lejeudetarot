@@ -162,12 +162,20 @@ class Game:
                                kept_fool=fool['seat'] if fool and fool['seat'] != winner else None))
         s['trick'] = []
         if last:
-            s.update(phase='finished', turn=None)
-            s['result'] = settle(s)
-            self.finish_awards()
-            s['notice'] = '本局结束，查看计分明细。'
+            if s['contract'] in ('sans', 'contre'):
+                s.update(phase='revealing', turn=None, kitty_revealed=True,
+                         notice='最后一墩已收完，向所有玩家展示底牌 10 秒，随后结算。')
+            else:
+                self.finish()
         else:
             s.update(phase='playing', turn=winner, notice='上一墩已收齐，由赢家先出。')
+
+    def finish(self):
+        s = self.data
+        s.update(phase='finished', turn=None)
+        s['result'] = settle(s)
+        self.finish_awards()
+        s['notice'] = '本局结束，查看计分明细。'
 
     def timeout(self):
         s = self.data
@@ -179,3 +187,5 @@ class Game:
             self.action(s['turn'], 'play', {'card': RNG.choice(legal_plays(s['hands'][s['turn']], s['trick']))})
         elif s['phase'] == 'collecting':
             self.collect()
+        elif s['phase'] == 'revealing':
+            self.finish()

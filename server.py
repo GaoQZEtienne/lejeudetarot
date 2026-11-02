@@ -41,7 +41,7 @@ class Room:
         self.social_events = []
         self.social_serial = 0
         self.social_times = [0.0] * 4
-        self.durations = dict(bidding=30, discard=90, playing=60, collecting=2)
+        self.durations = dict(bidding=30, discard=90, playing=60, collecting=2, revealing=10)
         self.durations.update(durations or {})
         self.connections = [set() for _ in range(4)]
         self.close_tasks = set()
@@ -177,7 +177,7 @@ class Room:
             contract=s['contract'], contracts=CONTRACTS, bids=s['bids'],
             kitty_revealed=s['kitty_revealed'], tricks=deepcopy(s['tricks']),
             announcements=deepcopy(s['announcements']), award_epoch=s['award_epoch'],
-            social_events=deepcopy(self.social_events),
+            social_events=deepcopy([e for e in self.social_events if time.time() - e['time'] < 5]),
             quick_chats=QUICK_CHATS,
             duration=self.durations.get(s['phase'], 0))
 
@@ -214,7 +214,7 @@ class Room:
         phase = self.game.data['phase']
         def apply():
             self.game.timeout()
-            if phase != 'collecting':
+            if phase not in ('collecting', 'revealing'):
                 self.game.data['notice'] = '上一操作超时，系统已自动处理。' + self.game.data['notice']
         self.transaction(apply)
         return True
@@ -260,7 +260,7 @@ class Room:
         self.social_times[seat] = now
         self.social_serial += 1
         self.social_events.append(event)
-        self.social_events = self.social_events[-30:]
+        self.social_events = [e for e in self.social_events if now - e['time'] < 5]
 
     def handle_action(self, seat, data):
         action = data.get('action')
@@ -318,6 +318,7 @@ class Room:
             await asyncio.sleep(0.2)
             async with self.lock:
                 changed = self.expire_poll()
+                self.social_events = [e for e in self.social_events if time.time() - e['time'] < 5]
                 if self.game.data['phase'] in ('lobby', 'finished') and self.host is not None:
                     if not self.online(self.host) and time.time() - self.offline_since[self.host] >= 30:
                         candidate = next((i for i in range(4) if self.online(i)), None)

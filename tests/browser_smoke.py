@@ -78,14 +78,21 @@ async def main():
                     await pages[0].locator('#game').wait_for(state='visible')
                     assert await pages[0].evaluate('state.seat') == 0
                     await wait_state(pages[1], 'currentTrack === "leschampselysee" && !music.paused')
+                    await pages[0].locator('#chat-open').click()
                     await pages[0].get_by_role('button', name='这啥牌', exact=True).click()
-                    await wait_state(pages[1], 'state.social_events.some(e => e.text === "这啥牌")')
-                    await pages[1].locator('#gift-target').select_option('0')
+                    for page in pages:
+                        await page.locator('.speech-bubble[data-speaker="0"]').wait_for(state='visible')
+                        assert await page.locator('.speech-bubble[data-speaker="0"]').inner_text() == '这啥牌'
+                    await pages[1].locator('[data-seat="0"] button.avatar').click()
                     await pages[1].locator('#flower-button').click()
-                    await wait_state(pages[0], 'state.social_events.some(e => e.gift === "flower")')
-                    await pages[2].locator('#gift-target').select_option('0')
+                    await pages[0].locator('.gift-flight').wait_for(state='visible')
+                    await pages[2].locator('[data-seat="0"] button.avatar').click()
                     await pages[2].locator('#egg-button').click()
                     await wait_state(pages[0], 'state.social_events.some(e => e.gift === "egg")')
+                    await pages[0].screenshot(path=str(artifacts / 'table-social.png'), full_page=True)
+                    await pages[0].locator('.speech-bubble').wait_for(state='detached', timeout=6500)
+                    assert await pages[0].locator('#social-log').count() == 0
+                    assert await pages[0].locator('#history-open').count() == 0
                     await pages[room.host].get_by_role('button', name='开始游戏 →').click()
                     await wait_state(pages[0], "state.phase === 'bidding'")
                     deadline_before_vote = room.deadline
@@ -177,7 +184,7 @@ async def main():
                             await pages[0].set_viewport_size({'width': 1440, 'height': 1050})
                     await pages[0].locator('#result').wait_for(state='visible')
                     await wait_state(pages[0], 'currentTrack === "jiesuanyinyue"')
-                    await pages[0].locator('#history-open').click()
+                    await pages[0].locator('[data-seat="0"] .trick-link').click()
                     for seat_index in range(4):
                         await pages[0].locator('#inspect-tabs button').nth(seat_index).click()
                         expected = sum(t['winner'] == seat_index for t in room.game.data['tricks'])
@@ -256,6 +263,44 @@ async def main():
                     await pages[0].set_viewport_size({'width': 390, 'height': 844})
                     assert await pages[0].evaluate('document.documentElement.scrollWidth <= innerWidth')
                     await pages[0].screenshot(path=str(artifacts / 'modi-mobile.png'), full_page=True)
+                    # End the hidden-kitty deal through the real engine. The UI
+                    # must show six cards for ten seconds before score/winner UI.
+                    async with room.lock:
+                        while room.game.data['phase'] != 'revealing':
+                            room.transaction(room.game.timeout)
+                        reveal_deadline = room.deadline
+                        old_totals = [p['total2'] for p in room.players]
+                        await room.broadcast()
+                    for page in pages:
+                        await page.locator('#reveal-panel').wait_for(state='visible')
+                        assert await page.locator('#reveal-cards .playing-card').count() == 6
+                        assert await page.locator('#result').is_hidden()
+                        assert await page.evaluate('state.result') is None
+                    assert reveal_deadline - __import__('time').time() > 8
+                    await pages[0].screenshot(path=str(artifacts / 'kitty-reveal-mobile.png'), full_page=True)
+                    assert await pages[0].evaluate('document.documentElement.scrollWidth <= innerWidth')
+                    assert await pages[0].evaluate('''() => {
+                        const reveal = document.querySelector('#reveal-panel').getBoundingClientRect();
+                        const left = document.querySelector('.seat.left').getBoundingClientRect();
+                        const right = document.querySelector('.seat.right').getBoundingClientRect();
+                        return left.right <= reveal.left && right.left >= reveal.right;
+                    }'''), 'Mobile reveal panel must not cover player names or trick links'
+                    await asyncio.sleep(2)
+                    assert [p['total2'] for p in room.players] == old_totals
+                    assert room.game.data['phase'] == 'revealing'
+                    await pages[1].reload()
+                    await pages[1].locator('#reveal-panel').wait_for(state='visible')
+                    assert room.deadline == reveal_deadline
+                    await wait_state(pages[0], 'state.phase === "finished"')
+                    assert __import__('time').time() >= reveal_deadline
+                    assert await pages[0].locator('#reveal-panel').is_hidden()
+                    # Dismiss any legitimate end-of-deal achievement before cleanup.
+                    for page in pages:
+                        await wait_state(page, 'state.phase === "finished"')
+                        while await page.locator('#award-dialog').is_visible():
+                            await page.locator('#award-close').click()
+                    await pages[room.host].get_by_role('button', name='开始下一局 →').click()
+                    await wait_state(pages[0], 'state.phase === "bidding"')
                     # Finish browser WebSocket handshakes before closing Edge's pipes on Windows.
                     await asyncio.gather(*(p.get_by_role('button', name='离开房间', exact=True).click() for p in pages))
                     await asyncio.gather(*(p.locator('#welcome').wait_for(state='visible') for p in pages))
@@ -298,6 +343,8 @@ async def main():
                                       'music_transitions': True, 'countdown_tone': True,
                                       'quick_chats_and_gifts': True, 'all_award_popups': True,
                                       'vote_rejection_cooldown': True,
+                                      'seat_history_links': True, 'ephemeral_table_chat': True,
+                                      'avatar_gifts': True, 'ten_second_kitty_reveal': True,
                                       'service_restart_clears_cached_identity': True,
                                       'home_survives_reload_and_online': True, 'browser_errors': errors}, ensure_ascii=False))
                 finally:
