@@ -1,14 +1,11 @@
 """Seat-independent bot interface. Policies receive only a private player view.
 
-This module holds the shared interface and random integration baseline.
+This module holds the shared interface and private observation boundary.
 Keep policies synchronous and bounded; Room runs them outside its event-loop lock.
 """
 from copy import deepcopy
 from dataclasses import dataclass, field
-import random
 from typing import Protocol
-
-from .rules import auto_discard
 
 
 @dataclass(frozen=True)
@@ -36,20 +33,3 @@ def observation_from_view(view):
                                            if contract['multiplier'] > highest]
     observation['ruleset'] = 'house-tarot-v1'
     return observation
-
-
-class RandomPolicy:
-    """Legal placeholder: coin-flip Prise/pass, legal discard, random legal play."""
-    def __init__(self, rng=None):
-        self.rng = rng or random.Random()
-
-    def choose(self, observation):
-        phase = observation['phase']
-        if phase == 'bidding':
-            bid = 'prise' if 'prise' in observation['legal_bids'] and self.rng.random() < .5 else 'pass'
-            return BotDecision('bid', {'bid': bid})
-        if phase == 'discard':
-            return BotDecision('discard', {'cards': auto_discard(observation['hand'])})
-        if phase == 'playing':
-            return BotDecision('play', {'card': self.rng.choice(observation['legal'])})
-        raise ValueError('Bot cannot act in this phase')

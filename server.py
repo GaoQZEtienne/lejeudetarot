@@ -20,7 +20,7 @@ from game.rules import RuleError, discard_options, lead_suit, legal_plays
 from game.state import Game
 from game.storage import Storage
 from game.contracts import CONTRACTS
-from game.bots import POLICIES, POLICY_LABELS, AdvancedPolicy, NormalPolicy, RandomPolicy, observation_from_view
+from game.bots import POLICIES, POLICY_LABELS, AdvancedPolicy, NormalPolicy, observation_from_view
 
 ROOT = Path(__file__).resolve().parent
 LOG = logging.getLogger('tarot')
@@ -176,7 +176,7 @@ class Room:
             return
         policy = payload.get('policy', 'normal')
         if not isinstance(policy, str) or policy not in POLICIES:
-            raise RuleError('该人机策略尚未开放')
+            raise RuleError('请选择普通或进阶人机')
         if action == 'bot_set_policy':
             target = payload.get('seat')
             if type(target) is not int or target not in range(4) or not self.is_bot(target):
@@ -260,15 +260,13 @@ class Room:
                     return
                 try:
                     if decision is None:
-                        fallback_policy = NormalPolicy() if self.players[seat]['policy'] == 'advanced' else RandomPolicy()
-                        decision = fallback_policy.choose(self.bot_observation(seat))
+                        decision = NormalPolicy().choose(self.bot_observation(seat))
                     if decision.action not in ('bid', 'discard', 'play'):
                         raise RuleError('Bot must return a turn action')
                     self.transaction(lambda: self.game.action(seat, decision.action, decision.payload))
                 except Exception:
                     LOG.exception('Invalid bot action; using a legal fallback.')
-                    fallback_policy = NormalPolicy() if self.players[seat]['policy'] == 'advanced' else RandomPolicy()
-                    fallback = fallback_policy.choose(self.bot_observation(seat))
+                    fallback = NormalPolicy().choose(self.bot_observation(seat))
                     self.transaction(lambda: self.game.action(seat, fallback.action, fallback.payload))
                 await self.broadcast()
         except asyncio.CancelledError:

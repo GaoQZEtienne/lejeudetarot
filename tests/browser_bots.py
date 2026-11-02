@@ -44,6 +44,7 @@ async def main():
                     await host.locator('#join-button').click()
                     await host.locator('#bot-panel').wait_for(state='visible')
                     assert await host.locator('#bot-policy').input_value() == 'normal'
+                    assert await host.locator('#bot-policy option').evaluate_all('(options) => options.map(option => option.value)') == ['normal', 'advanced']
                     await host.locator('#bot-policy').select_option('advanced')
                     await host.get_by_role('button', name='在第 4 号座位添加人机').click()
                     await wait_state(host, 'state.players[3]?.kind === "bot" && !pending')
@@ -53,13 +54,14 @@ async def main():
                     await host.locator('#bot-policy').select_option('normal')
                     await host.get_by_role('button', name='添加人机', exact=True).click()
                     await wait_state(host, 'state.players.filter(p => p?.kind === "bot").length === 2 && !pending')
-                    await host.locator('#bot-policy').select_option('random')
+                    await host.locator('#bot-policy').select_option('normal')
                     await host.get_by_role('button', name='补齐人机', exact=True).click()
                     await wait_state(host, 'state.players.every(Boolean) && !pending')
                     assert await host.locator('#bot-count').inner_text() == '1 真人 · 3 人机'
                     assert await host.get_by_role('button', name='补齐人机', exact=True).is_disabled()
                     assert await host.get_by_role('button', name='开始游戏 →', exact=True).is_enabled()
-                    assert [p.get('policy') for p in room.players] == [None, 'normal', 'random', 'advanced']
+                    assert [p.get('policy') for p in room.players] == [None, 'normal', 'normal', 'advanced']
+                    assert await host.locator('#bot-roster option[value="random"]').count() == 0
                     # Individual changes use the same host-only outside-game protocol.
                     bot_name = room.players[1]['name']
                     await host.get_by_role('combobox', name=f'{bot_name}的难度').select_option('advanced')
@@ -158,7 +160,7 @@ async def main():
                     assert room.players == [None] * 4
                     assert not errors, errors
                     print(json.dumps({'full_round': True, 'add_remove_fill': True,
-                                      'three_difficulties_and_individual_changes': True,
+                                      'two_difficulties_and_individual_changes': True,
                                       'single_human_restart_pause_resume': True,
                                       'mobile_replacement_and_two_human_vote': True,
                                       'last_human_clears_bots': True, 'browser_errors': errors}))

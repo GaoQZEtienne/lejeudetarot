@@ -1,6 +1,5 @@
 import asyncio
 from copy import deepcopy
-import random
 import threading
 import time
 import unittest
@@ -8,7 +7,7 @@ from unittest.mock import patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from game.bots import BotDecision, RandomPolicy
+from game.bots import BotDecision, NormalPolicy
 from game.rules import auto_discard, RuleError
 from game.storage import Storage
 from server import ROOM_KEY, Room, create_app
@@ -49,8 +48,8 @@ class BotObservationTests(unittest.TestCase):
                 for seat in range(4):
                     self.assertEqual(room.bot_observation(seat)['discard'], cards if seat == taker else [])
 
-    def test_random_policy_completes_all_contracts_through_same_interface(self):
-        policy = RandomPolicy(random.Random(17))
+    def test_normal_policy_completes_all_contracts_through_same_interface(self):
+        policy = NormalPolicy()
         for contract in ('prise', 'garde', 'jiedi', 'sans', 'contre'):
             self.room.game.new_deal()
             self.room.game.action(self.room.game.data['turn'], 'bid', {'bid': contract})
@@ -99,8 +98,6 @@ class BotRoomTests(unittest.IsolatedAsyncioTestCase):
 
     async def act(self, action, payload=None, peer=None):
         peer = peer or self.peers[0]
-        if action in ('bot_add', 'bot_fill'):
-            payload = {'policy': 'random', **(payload or {})}
         await peer.wait(lambda s: s['revision'] == self.room.revision)
         response = await peer.act(action, payload)
         self.assertEqual(response['type'], 'ack', response)
@@ -117,10 +114,13 @@ class BotRoomTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.room.online(3))
         self.assertNotIn('token_hash', self.room.players[3])
         self.assertIsNone(self.room.identify('not-a-bot-token-but-long-enough'))
-        for payload in ({'seat': True}, {'seat': -1}, {'seat': 0}, {'seat': []}, {'seat': 2, 'policy': 'missing'}, {'seat': 2, 'policy': []}):
+        for payload in ({'seat': True}, {'seat': -1}, {'seat': 0}, {'seat': []}, {'seat': 2, 'policy': 'missing'}, {'seat': 2, 'policy': 'random'}, {'seat': 2, 'policy': []}):
             response = await self.peers[0].act('bot_add', payload)
             self.assertEqual(response['type'], 'error', payload)
         await self.act('bot_fill')
+        self.assertEqual({p['id'] for p in self.peers[0].state['bot_policies']}, {'normal', 'advanced'})
+        self.assertEqual((await self.peers[0].act('bot_fill', {'policy': 'random'}))['type'], 'error')
+        self.assertEqual((await self.peers[0].act('bot_set_policy', {'seat': 3, 'policy': 'random'}))['type'], 'error')
         lobby = await (await self.client.get('/api/lobby')).json()
         self.assertEqual((lobby['occupied'], lobby['humans'], lobby['bots']), (4, 2, 2))
         self.assertEqual(len({p['name'] for p in self.room.players}), 4)
@@ -256,7 +256,7 @@ class BotRoomTests(unittest.IsolatedAsyncioTestCase):
             self.room.game.data['turn'] = 1
             await self.room.broadcast()
         try:
-            with patch.dict('server.POLICIES', {'random': SlowPolicy()}):
+            with patch.dict('server.POLICIES', {'normal': SlowPolicy()}):
                 async with asyncio.timeout(2):
                     while not entered.is_set():
                         await asyncio.sleep(.01)
@@ -285,9 +285,11 @@ class BotRoomTests(unittest.IsolatedAsyncioTestCase):
             self.room.game.data['turn'] = 1
             await self.room.broadcast()
         legal = self.room.view(1)['legal']
-        with patch.dict('server.POLICIES', {'random': InvalidPolicy()}), self.assertLogs('tarot', level='ERROR'):
+        expected = NormalPolicy().choose(self.room.bot_observation(1)).payload['card']
+        with patch.dict('server.POLICIES', {'normal': InvalidPolicy()}), self.assertLogs('tarot', level='ERROR'):
             await self.peers[0].wait(lambda s: bool(s['trick']))
         self.assertIn(self.room.game.data['trick'][0]['card'], legal)
+        self.assertEqual(self.room.game.data['trick'][0]['card'], expected)
         self.assertEqual(self.room.game.data['trick'][0]['seat'], 1)
 
     async def test_complete_round_with_each_number_of_bots(self):

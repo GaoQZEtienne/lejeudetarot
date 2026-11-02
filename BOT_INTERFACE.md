@@ -1,6 +1,6 @@
 # 人机接口与策略实现
 
-三个阶段均已实现：座位接入、普通版策略、进阶版采样模拟。注册 `random`（基础）、`normal`（普通，默认）、`advanced`（进阶）；每位人机独立选择策略。
+三个阶段均已实现：座位接入、普通版策略、进阶版采样模拟。仅注册 `normal`（普通，默认）、`advanced`（进阶）；每位人机独立选择策略。基础随机版已移除，接口拒绝 `policy: random`。
 
 ## 房间管理协议
 
@@ -8,8 +8,8 @@
 
 | action | payload | 行为 |
 | --- | --- | --- |
-| `bot_add` | `{ "seat": 2, "policy": "random" }` | 指定空座位添加；省略 seat 时使用首个空位 |
-| `bot_fill` | `{ "policy": "random" }` | 补满所有空座位 |
+| `bot_add` | `{ "seat": 2, "policy": "normal" }` | 指定空座位添加；省略 seat 时使用首个空位 |
+| `bot_fill` | `{ "policy": "normal" }` | 补满所有空座位 |
 | `bot_remove` | `{ "seat": 2 }` | 仅移除指定人机，释放座位并清空其积分／成就 |
 | `bot_set_policy` | `{ "seat": 2, "policy": "advanced" }` | 局外切换指定人机策略，保留积分与成就 |
 
@@ -17,7 +17,7 @@ seat 为 0～3 的整数，布尔值不接受；policy 默认 normal，未知策
 
 ## 策略边界
 
-`game/bots.py` 统一导出 `BotPolicy.choose(observation) -> BotDecision`。类型与基础策略在 `bot_policy.py`，普通版在 `bot_strategy.py`，进阶版在 `bot_search.py`。决策为 `BotDecision(action, payload, diagnostics)`，action 只允许 bid／discard／play，payload 与真人操作格式相同；最终一律经过 `Game.action()` 校验。diagnostics 为离线测评使用的可选统计，不进入牌局动作或向浏览器下发。
+`game/bots.py` 统一导出 `BotPolicy.choose(observation) -> BotDecision`。共享类型与可见信息边界在 `bot_policy.py`，普通版在 `bot_strategy.py`，进阶版在 `bot_search.py`。决策为 `BotDecision(action, payload, diagnostics)`，action 只允许 bid／discard／play，payload 与真人操作格式相同；最终一律经过 `Game.action()` 校验。diagnostics 为离线测评使用的可选统计，不进入牌局动作或向浏览器下发。
 
 `Room.bot_observation(seat)` 从该座位的可见状态按白名单深拷贝。包含本人手牌／合法牌、轮次／行动者、公共玩家信息、叫分／可叫合同、当前墩／完整已打墩、公开底牌／必要扣将，以及该座位应当知道的扣牌。×4／×6 未揭晓的底牌不提供；防守人机不能看到庄家私有扣牌。没有其他座位的手牌、Token、整个 Game.data、网络连接或投票数据。`ruleset: house-tarot-v1` 指当前先扣后收、无需压将等自定义规则。
 
@@ -26,7 +26,7 @@ seat 为 0～3 的整数，布尔值不接受；policy 默认 normal，未知策
 ## 调度和生命周期
 
 - 每步人机默认延迟 0.8 秒，沿用现有每 0.2 秒的房间调度。收墩仍展示 2 秒，×4／×6 最后亮牌仍为 10 秒。
-- 普通／基础策略在 worker 线程中执行；进阶策略在按需启动的单个 spawn 计算进程中执行，只有 observation 副本传入。计算时不持有房间锁；等待超过 2 秒、策略异常或非法动作时回退（进阶回退普通，其他回退基础）。正常回合超时处理保持原样。
+- 普通策略在 worker 线程中执行；进阶策略在按需启动的单个 spawn 计算进程中执行，只有 observation 副本传入。计算时不持有房间锁；等待超过 2 秒、策略异常或非法动作时统一使用普通策略兜底。正常回合超时处理保持原样。
 - 提交时重新检查 revision、行动者、阶段和暂停状态；重开、轮次改变、超时或投票改变状态后，旧结果作废。取消已调度任务；计算线程返回的旧结果不得应用。
 - 全部真人连接断开时暂停并取消人机任务，真人恢复后重新调度。房主只在真人间转移；人机不参与重开投票。状态公开 `restart_required`、`restart_reject_required`，界面按实际真人数显示。
 - 服务关闭时取消人机任务、取消排队的计算并关闭计算进程池，保持服务重启清空房间的现有约定。
@@ -51,7 +51,7 @@ seat 为 0～3 的整数，布尔值不接受；policy 默认 normal，未知策
 
 ## 验证与复现
 
-`python -m unittest discover -v` 验证合法性、具体策略场景、可见信息隔离、采样的 78 张牌守恒与历史重放、两档真实房间接入和原游戏回归。`tests/browser_bots.py` 用实际 Edge 操作三档选择、逐个改难度、完整混合人机牌局、重开和手机补位。
+`python -m unittest discover -v` 验证合法性、具体策略场景、可见信息隔离、采样的 78 张牌守恒与历史重放、两档真实房间接入和原游戏回归。`tests/browser_bots.py` 用实际 Edge 操作两档选择、逐个改难度、完整混合人机牌局、重开和手机补位。
 
 ```powershell
 .\.venv\Scripts\python.exe tests/benchmark_bots.py --candidate normal --baseline random --opponents random --deals 100
@@ -59,3 +59,5 @@ seat 为 0～3 的整数，布尔值不接受；policy 默认 normal，未知策
 ```
 
 每组发牌轮换四个被测座位，基线与候选使用相同发牌、合同和随机对手种子；仅被测座位更换策略。五档合同循环固定，测量扣牌／出牌效果，不能把结果解释为叫牌质量或对真人胜率。报告平均合同分差及按整副发牌聚类的近似区间，避免把同一副牌的四个座位视为独立样本。进阶默认时间预算，计算速度影响实际完成的样本数，因此结果可有波动。
+
+随机对照仅存在于离线测评脚本 `tests/benchmark_bots.py`，用于复现历史对照，不属于游戏策略注册表，也不能通过房间接口添加。

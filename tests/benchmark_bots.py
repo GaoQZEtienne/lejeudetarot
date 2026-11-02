@@ -13,15 +13,30 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from game.bot_policy import RandomPolicy
+from game.bot_policy import BotDecision
 from game.bot_search import AdvancedPolicy
 from game.bot_strategy import NormalPolicy
+from game.rules import auto_discard
 from tests.bot_fixtures import fixed_game, play_match
+
+
+class RandomBaseline:
+    """Offline measurement only; never registered as a playable bot."""
+    def __init__(self, rng):
+        self.rng = rng
+
+    def choose(self, observation):
+        if observation['phase'] == 'bidding':
+            bid = 'prise' if 'prise' in observation['legal_bids'] and self.rng.random() < .5 else 'pass'
+            return BotDecision('bid', {'bid': bid})
+        if observation['phase'] == 'discard':
+            return BotDecision('discard', {'cards': auto_discard(observation['hand'])})
+        return BotDecision('play', {'card': self.rng.choice(observation['legal'])})
 
 
 def policy(kind, seed, budget):
     if kind == 'random':
-        return RandomPolicy(random.Random(seed))
+        return RandomBaseline(random.Random(seed))
     if kind == 'advanced':
         return AdvancedPolicy(budget=budget, seed=seed)
     return NormalPolicy()
