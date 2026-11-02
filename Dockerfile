@@ -4,6 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY game ./game
 COPY static ./static
+COPY musics ./musics
 COPY server.py .
 RUN useradd --create-home --uid 10001 tarot && mkdir /app/data && chown tarot:tarot /app/data
 USER tarot

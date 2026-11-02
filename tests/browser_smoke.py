@@ -77,23 +77,41 @@ async def main():
                     await pages[0].locator('#join-button').click()
                     await pages[0].locator('#game').wait_for(state='visible')
                     assert await pages[0].evaluate('state.seat') == 0
+                    await wait_state(pages[1], 'currentTrack === "leschampselysee" && !music.paused')
+                    await pages[0].get_by_role('button', name='这啥牌', exact=True).click()
+                    await wait_state(pages[1], 'state.social_events.some(e => e.text === "这啥牌")')
+                    await pages[1].locator('#gift-target').select_option('0')
+                    await pages[1].locator('#flower-button').click()
+                    await wait_state(pages[0], 'state.social_events.some(e => e.gift === "flower")')
+                    await pages[2].locator('#gift-target').select_option('0')
+                    await pages[2].locator('#egg-button').click()
+                    await wait_state(pages[0], 'state.social_events.some(e => e.gift === "egg")')
                     await pages[room.host].get_by_role('button', name='开始游戏 →').click()
                     await wait_state(pages[0], "state.phase === 'bidding'")
                     deadline_before_vote = room.deadline
                     await pages[0].get_by_role('button', name='重开投票', exact=True).click()
-                    await wait_state(pages[1], 'state.restart_votes.length === 1')
+                    await wait_state(pages[1], 'state.restart_poll?.yes.length === 1')
                     assert room.deadline == deadline_before_vote
-                    assert await pages[0].get_by_role('button', name='已赞成（1/2）', exact=True).is_disabled()
+                    assert await pages[0].get_by_role('button', name='已同意', exact=True).is_disabled()
                     await pages[0].reload()
                     await pages[0].locator('#game').wait_for(state='visible')
-                    assert await pages[0].get_by_role('button', name='已赞成（1/2）', exact=True).is_disabled()
+                    assert await pages[0].get_by_role('button', name='已同意', exact=True).is_disabled()
                     await pages[1].screenshot(path=str(artifacts / 'restart-vote.png'), full_page=True)
-                    await pages[1].get_by_role('button', name='赞成重开（1/2）', exact=True).click()
-                    await wait_state(pages[0], "state.round === 2 && state.phase === 'bidding'")
-                    assert room.game.data.get('restart_votes', []) == []
+                    await pages[1].get_by_role('button', name='同意重开', exact=True).click()
+                    await wait_state(pages[0], "state.round === 0 && state.phase === 'lobby'")
+                    assert room.game.data['restart_poll'] is None
                     assert all(p['total2'] == 0 for p in room.players)
+                    await pages[room.host].get_by_role('button', name='开始游戏 →').click()
+                    await wait_state(pages[0], "state.phase === 'bidding'")
                     bidder = room.game.data['turn']
-                    await pages[bidder].get_by_role('button', name='Petit ×1', exact=True).click()
+                    await wait_state(pages[bidder], 'state.turn === state.seat && !pending')
+                    await pages[bidder].get_by_role('button', name='Prise ×1', exact=True).click()
+                    await wait_state(pages[bidder], '!pending')
+                    while room.game.data['phase'] == 'bidding':
+                        current = pages[room.game.data['turn']]
+                        await wait_state(current, 'state.turn === state.seat && !pending')
+                        await current.get_by_role('button', name='不叫', exact=True).click()
+                        await wait_state(current, '!pending')
                     await wait_state(pages[bidder], "state.phase === 'discard' && !pending")
                     await pages[bidder].screenshot(path=str(artifacts / 'discard-desktop.png'), full_page=True)
                     original = await pages[bidder].evaluate('state.hand.slice()')
@@ -104,7 +122,15 @@ async def main():
                         await wait_state(pages[bidder], '!pending')
                     await pages[bidder].get_by_role('button', name='确认扣六张').click()
                     await wait_state(pages[bidder], "state.phase === 'playing'")
+                    await wait_state(pages[bidder], 'currentTrack === "seikobeatclub"')
                     assert set(kitty) <= set(await pages[bidder].evaluate('state.hand'))
+                    await pages[bidder].locator('#discard-open').click()
+                    assert await pages[bidder].locator('#inspect-content .playing-card').count() == 6
+                    await pages[bidder].get_by_role('button', name='关闭查牌', exact=True).click()
+                    await pages[(bidder + 1) % 4].locator('#kitty-open').click()
+                    assert await pages[(bidder + 1) % 4].locator('#inspect-content .playing-card').count() == 6
+                    await pages[(bidder + 1) % 4].get_by_role('button', name='关闭查牌', exact=True).click()
+                    assert await pages[(bidder + 1) % 4].locator('#discard-open').is_hidden()
                     await pages[bidder].reload()
                     await pages[bidder].locator('#game').wait_for(state='visible')
                     assert await pages[bidder].evaluate('state.seat') == bidder
@@ -112,6 +138,7 @@ async def main():
                     deadline_before = room.deadline
                     await pages[bidder].get_by_role('button', name='离开房间', exact=True).click()
                     await pages[bidder].locator('#welcome').wait_for(state='visible')
+                    assert await pages[bidder].evaluate('music.paused && currentTrack === ""')
                     await wait_state(pages[(bidder + 1) % 4], f'!state.players[{bidder}].online')
                     await pages[bidder].reload()
                     await pages[bidder].locator('#resume-button').wait_for(state='visible')
@@ -149,6 +176,14 @@ async def main():
                             await pages[0].screenshot(path=str(artifacts / 'trick-mobile.png'), full_page=True)
                             await pages[0].set_viewport_size({'width': 1440, 'height': 1050})
                     await pages[0].locator('#result').wait_for(state='visible')
+                    await wait_state(pages[0], 'currentTrack === "jiesuanyinyue"')
+                    await pages[0].locator('#history-open').click()
+                    for seat_index in range(4):
+                        await pages[0].locator('#inspect-tabs button').nth(seat_index).click()
+                        expected = sum(t['winner'] == seat_index for t in room.game.data['tricks'])
+                        actual = await pages[0].locator('#inspect-content h3').all_text_contents()
+                        assert sum(text.startswith('第 ') for text in actual) == expected
+                    await pages[0].get_by_role('button', name='关闭查牌', exact=True).click()
                     assert played == 72, played
                     assert room.game.data['result']['points'] + room.game.data['result']['defense_points'] == 91
                     assert sum(room.game.data['result']['scores']) == 0
@@ -166,10 +201,82 @@ async def main():
                     assert await pages[0].evaluate('state.players[0].total') == 0
                     assert await pages[0].evaluate('state.result.players[0].name') == '秋水'
                     await pages[room.host].get_by_role('button', name='开始下一局 →').click()
-                    await wait_state(pages[0], "state.phase === 'bidding' && state.round === 3")
+                    await wait_state(pages[0], "state.phase === 'bidding' && state.round === 2")
+                    # Reject a poll, check cooldown and the final-five-second tone.
+                    await pages[0].locator('#restart-button').click()
+                    for i in [1, 2, 3]:
+                        await wait_state(pages[i], 'Boolean(state.restart_poll) && !pending')
+                        await pages[i].locator('#restart-no').click()
+                    await wait_state(pages[0], '!state.restart_poll && state.restart_cooldown > state.server_time')
+                    assert await pages[0].locator('#restart-button').is_disabled()
+                    async with room.lock:
+                        room.deadline = __import__('time').time() + 4.8
+                        await room.broadcast()
+                    await wait_state(pages[1], 'lastBeep.endsWith(":5") || lastBeep.endsWith(":4")')
+                    assert await pages[1].evaluate('audioContext.state') == 'running'
+                    async with room.lock:
+                        room.set_deadline()
+                        for stats in room.game.data['stats']:
+                            stats['passes'] = 4
+                        await room.broadcast()
+                    for _ in range(4):
+                        current = pages[room.game.data['turn']]
+                        await wait_state(current, 'state.turn === state.seat && !pending')
+                        await current.get_by_role('button', name='不叫', exact=True).click()
+                        await wait_state(current, '!pending')
+                    for page in pages:
+                        await page.locator('#award-dialog').wait_for(state='visible')
+                        assert await page.locator('#award-title').inner_text() == '玄武制胜'
+                        assert len((await page.locator('#award-names').inner_text()).split('、')) == 4
+                    await pages[0].screenshot(path=str(artifacts / 'achievement.png'), full_page=True)
+                    for page in pages:
+                        await page.locator('#award-close').click()
+                    # Exercise the queued presentation of the other award types.
+                    async with room.lock:
+                        for kind in ['streak', 'taker', 'bidder']:
+                            room.transaction(lambda kind=kind: room.game.announce(kind, [0, 1]), reset_clock=False)
+                        await room.broadcast()
+                    for title in ['TA的连胜，我很怕', '不要，妨碍我', '我叫，我再叫！']:
+                        for page in pages:
+                            await page.locator('#award-dialog').wait_for(state='visible')
+                            assert await page.locator('#award-title').inner_text() == title
+                            await page.locator('#award-close').click()
+                    current = pages[room.game.data['turn']]
+                    await current.get_by_role('button', name='Garde sans ×4', exact=True).click()
+                    await wait_state(current, '!pending')
+                    while room.game.data['phase'] == 'bidding':
+                        current = pages[room.game.data['turn']]
+                        await wait_state(current, 'state.turn === state.seat && !pending')
+                        await current.get_by_role('button', name='不叫', exact=True).click()
+                        await wait_state(current, '!pending')
+                    for page in pages:
+                        await wait_state(page, 'state.phase === "playing" && currentTrack === "seikobeatclub"')
+                        assert await page.locator('#kitty-open').is_hidden()
+                        assert await page.locator('#discard-open').is_hidden()
+                    await pages[0].set_viewport_size({'width': 390, 'height': 844})
+                    assert await pages[0].evaluate('document.documentElement.scrollWidth <= innerWidth')
+                    await pages[0].screenshot(path=str(artifacts / 'modi-mobile.png'), full_page=True)
                     # Finish browser WebSocket handshakes before closing Edge's pipes on Windows.
                     await asyncio.gather(*(p.get_by_role('button', name='离开房间', exact=True).click() for p in pages))
                     await asyncio.gather(*(p.locator('#welcome').wait_for(state='visible') for p in pages))
+                    async with asyncio.timeout(5):
+                        while not room.paused:
+                            await asyncio.sleep(0.03)
+                    # Restart on the same origin: cached identities and resume pages
+                    # must become a fresh nickname form, even without clicking resume.
+                    port = server.port
+                    await server.close()
+                    app = create_app(str(Path(temp) / 'browser.sqlite3'))
+                    room = app[ROOM_KEY]
+                    server = TestServer(app, port=port)
+                    await server.start_server()
+                    for page in pages:
+                        await page.reload()
+                        await page.locator('#join-form').wait_for(state='visible')
+                        assert await page.locator('#resume-button').is_hidden()
+                        assert await page.locator('#nickname').input_value() == ''
+                        assert await page.evaluate("localStorage.getItem('tarot-seat-token')") is None
+                    assert room.players == [None] * 4
                     # Context teardown also releases sockets from earlier page reloads.
                     await asyncio.gather(*(context.close() for context in contexts))
                     try:
@@ -187,6 +294,11 @@ async def main():
                                       'next_round': True, 'leave_and_resume': True,
                                       'outside_leave_releases_seat': True, 'fifth_browser_joined': True,
                                       'two_person_restart': True,
+                                      'contract_auction': True, 'private_card_history': True,
+                                      'music_transitions': True, 'countdown_tone': True,
+                                      'quick_chats_and_gifts': True, 'all_award_popups': True,
+                                      'vote_rejection_cooldown': True,
+                                      'service_restart_clears_cached_identity': True,
                                       'home_survives_reload_and_online': True, 'browser_errors': errors}, ensure_ascii=False))
                 finally:
                     await browser.close()

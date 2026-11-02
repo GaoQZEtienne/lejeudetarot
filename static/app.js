@@ -15,12 +15,21 @@ let state = null, ws = null, pending = null, selection = [], selectionKey = '', 
 let connected = false, retryCount = 0, toastTimer, clockOffset = 0, token = '';
 let intentionalClose = false;
 let leaving = false;
+let roomSession = '';
+try { roomSession = localStorage.getItem('tarot-session') || ''; } catch (_) {}
 try { token = localStorage.getItem('tarot-seat-token') || ''; } catch (_) { /* handled on join */ }
 try { intentionalClose = sessionStorage.getItem('tarot-on-home') === '1'; } catch (_) {}
 
 function refreshOccupancy() {
+  const requestedToken = token;
   fetch('/api/lobby').then(r => r.json()).then(data => {
     $('occupancy').textContent = `${data.occupied} / 4 已入座`;
+    if (data.session_id && roomSession !== data.session_id) {
+      const expired = Boolean(requestedToken && requestedToken === token);
+      roomSession = data.session_id;
+      try { localStorage.setItem('tarot-session', roomSession); } catch (_) {}
+      if (expired) forgetSeat();
+    }
   }).catch(() => {});
 }
 
@@ -35,6 +44,8 @@ function showHome() {
   connected = false;
   pending = null;
   state = null;
+  syncMusic();
+  awardQueue = [];
   selection = [];
   selectionKey = '';
   retryCount = 0;
@@ -162,6 +173,8 @@ function connect() {
       retryCount = 0;
       clockOffset = message.server_time * 1000 - Date.now();
       state = message;
+      roomSession = state.session_id;
+      try { localStorage.setItem('tarot-session', roomSession); } catch (_) {}
       const key = `${state.round}:${state.phase}:${state.turn}`;
       if (key !== selectionKey) { selection = []; selectionKey = key; }
       if (state.phase === 'discard' && state.seat === state.taker) selection = [...state.draft];
@@ -170,7 +183,7 @@ function connect() {
     } else if (message.type === 'ack' || message.type === 'error') {
       if (message.id === pending) pending = null;
       if (message.type === 'error') toast(message.message);
-      if (state) { renderHand(); renderActions(); renderVote(); }
+      if (state) { renderHand(); renderActions(); renderVote(); renderExtras(); }
     } else if (message.type === 'released') {
       forgetSeat();
     } else if (message.type === 'auth_error') {
@@ -209,6 +222,7 @@ function renderSeats() {
     info.append(label, el('div', 'seat-detail', !player ? '空座位' : !player.online ? '离线 · 保留座位' :
       state.phase === 'lobby' ? '已入座' : state.phase === 'bidding' && state.passed.includes(i) ? '不叫' : `${player.count} 张 · ${player.tricks} 墩`));
     seat.append(info);
+    if (player) seat.dataset.seat = String(i);
     $('seats').append(seat);
   });
 }
@@ -223,7 +237,7 @@ function renderTable() {
     const online = state.players.filter(p => p?.online).length;
     let title, detail;
     if (state.phase === 'lobby') { title = `${occupied} / 4 已入座`; detail = online === 4 ? '四人到齐，等待房主开始' : '把同一个链接分享给好友'; }
-    else if (state.phase === 'bidding') { title = 'Petit，还是不叫？'; detail = `等待 ${name(state.turn)} 叫牌`; }
+    else if (state.phase === 'bidding') { title = state.contract ? contractName(state.contract) : '叫分，还是不叫？'; detail = `等待 ${name(state.turn)} 叫分`; }
     else if (state.phase === 'discard') { title = '庄家正在扣牌'; detail = '从原手牌中扣六张，再收入底牌'; }
     else if (state.phase === 'finished') { title = '本局结束'; detail = '最后一张落定，看看这局的收获'; }
     else { title = `第 ${state.trick_number} 墩`; detail = `${name(state.turn)} 先出`; }
@@ -285,7 +299,11 @@ function renderActions() {
     note = state.turn === null ? '正在收墩…' : `等待 ${name(state.turn)} 操作`;
   } else if (state.phase === 'bidding') {
     note = '叫牌后，你将独自对抗另外三位。';
-    $('actions').append(actionButton('不叫', 'bid', {bid: 'pass'}, true, false), actionButton('Petit ×1', 'bid', {bid: 'take'}));
+    $('actions').append(actionButton('不叫', 'bid', {bid: 'pass'}, true, false));
+    const highest = state.contracts[state.contract]?.multiplier || 0;
+    for (const [key, value] of Object.entries(state.contracts)) {
+      if (value.multiplier > highest) $('actions').append(actionButton(contractName(key), 'bid', {bid: key}));
+    }
   } else if (state.phase === 'discard') {
     note = `已选 ${selection.length} / 6 张`;
     $('actions').append(actionButton('确认扣六张', 'discard', {cards: selection}, selection.length === 6));
@@ -313,7 +331,7 @@ function renderResult() {
     item.append(el('b', '', String(value)));
     stats.append(item);
   }
-  panel.append(stats, el('p', 'result-note', `基础 ${signed(r.base)} · 末将 ${signed(r.petit)} · 大满贯 ${signed(r.slam)} = 每份 ${signed(r.unit)} 分。${r.excuse_note} 庄家愚人补偿净额 ${signed(r.excuse_adjustment)} 分。`));
+  panel.append(stats, el('p', 'result-note', `${r.contract_name} ×${r.multiplier}：（基础 ${signed(r.base)} + 末将 ${signed(r.petit)}）×${r.multiplier} + 大满贯 ${signed(r.slam)} = 每份 ${signed(r.unit)} 分。${r.excuse_note} 庄家愚人补偿净额 ${signed(r.excuse_adjustment)} 分。`));
   const table = el('table');
   const head = el('thead'), hr = el('tr');
   for (const label of ['玩家', '身份', '本局', '累计']) hr.append(el('th', '', label));
@@ -326,18 +344,22 @@ function renderResult() {
     body.append(row);
   });
   table.append(body); panel.append(table);
-  panel.append(el('p', 'result-note', `庄家扣牌：${state.discard.map(cardName).join('、')}。两方总牌分 ${r.points + r.defense_points}，四人成绩合计 ${r.scores.reduce((a, b) => a + b, 0)}。`));
+  panel.append(el('p', 'result-note', `${state.discard.length ? '扣牌' : '隐藏底牌'}：${(state.discard.length ? state.discard : state.kitty).map(cardName).join('、')}。六张共 ${r.reserve_points} 分，归${r.reserve_owner === null ? r.reserve_team : participants[r.reserve_owner].name}。两方总牌分 ${r.points + r.defense_points}，四人成绩合计 ${r.scores.reduce((a, b) => a + b, 0)}。`));
 }
 
 function renderVote() {
   if (!state) return;
   const active = !['lobby', 'finished'].includes(state.phase);
-  const votes = state.restart_votes || [];
-  const voted = votes.includes(state.seat);
+  const poll = state.restart_poll;
+  const voted = poll && [...poll.yes, ...poll.no].includes(state.seat);
+  const now = (Date.now() + clockOffset) / 1000;
+  const cooldown = Math.max(0, Math.ceil(state.restart_cooldown - now));
   $('restart-panel').hidden = !active;
-  $('restart-status').textContent = votes.length ? `${votes.map(name).join('、')} 赞成重开（${votes.length}/2）` : '两人赞成即重新发牌，本局不计分。';
-  $('restart-button').textContent = voted ? `已赞成（${votes.length}/2）` : votes.length ? `赞成重开（${votes.length}/2）` : '重开投票';
-  $('restart-button').disabled = !connected || Boolean(pending) || leaving || voted;
+  $('restart-status').textContent = poll ? `重开剩余 ${Math.max(0, Math.ceil(poll.deadline - now))}s · 同意 ${poll.yes.length}/2（${poll.yes.map(name).join('、') || '无'}）· 拒绝 ${poll.no.length}/3（${poll.no.map(name).join('、') || '无'}）` : cooldown ? `投票未通过，${cooldown}s 后可再次发起。` : '20 秒内两人同意即回准备界面，并清空积分榜。';
+  $('restart-button').textContent = voted ? (poll.yes.includes(state.seat) ? '已同意' : '已拒绝') : poll ? '同意重开' : '重开投票';
+  $('restart-button').disabled = !connected || Boolean(pending) || leaving || voted || cooldown > 0;
+  $('restart-no').hidden = !poll;
+  $('restart-no').disabled = !connected || Boolean(pending) || leaving || voted;
   $('leave-button').title = active ? '回到初始界面并保留局内座位' : '释放座位并回到填写昵称的首页';
 }
 
@@ -353,6 +375,12 @@ function render() {
   $('turn-label').textContent = state.turn === null ? state.phase === 'collecting' ? '收墩展示' : '' : state.turn === state.seat ? '轮到你了' : name(state.turn) + ' 的回合';
   $('notice').textContent = state.notice;
   renderSeats(); renderTable(); renderHand(); renderActions(); renderResult(); renderVote();
+  renderExtras(); syncMusic(); receiveAwards();
+  if ($('inspect-dialog').open) renderInspection();
+  $('contract-label').textContent = state.contract ? contractName(state.contract) : '等待叫分';
+  $('kitty-open').hidden = !state.kitty.length;
+  $('kitty-open').textContent = state.kitty_revealed ? '查看公开底牌' : '查看结算底牌';
+  $('discard-open').hidden = state.seat !== state.taker || !state.discard.length;
   $('kitty-panel').hidden = state.phase !== 'discard';
   $('kitty-cards').replaceChildren(...state.kitty.map(c => cardElement(c)));
   $('kitty-note').textContent = state.seat === state.taker ? '这六张牌不能扣掉，将在扣牌后全部收入。' : '庄家将从原手牌扣六张，再收入这些底牌。';
@@ -362,10 +390,15 @@ function render() {
 }
 
 function updateClock() {
+  renderVote();
   if (!state?.deadline) { $('timer').textContent = '—'; return; }
   const remaining = Math.max(0, Math.ceil((state.deadline * 1000 - Date.now() - clockOffset) / 1000));
   $('timer').textContent = remaining + 's';
   $('timer').classList.toggle('urgent', remaining <= 8 && state.phase !== 'collecting');
+  if (connected && ['bidding', 'discard', 'playing'].includes(state.phase) && remaining > 0 && remaining <= 5) {
+    const key = `${state.round}:${state.deadline}:${remaining}`;
+    if (key !== lastBeep) { lastBeep = key; countdownBeep(remaining); }
+  }
 }
 setInterval(updateClock, 250);
 
@@ -392,7 +425,8 @@ $('resume-button').addEventListener('click', () => {
   if (!ws || ws.readyState === WebSocket.CLOSED) connect();
 });
 $('leave-button').addEventListener('click', leaveRoom);
-$('restart-button').addEventListener('click', () => send('restart_vote', {round: state.round}));
+$('restart-button').addEventListener('click', () => send('restart_vote', {round: state.round, poll_id: state.restart_poll?.id || null, choice: 'yes'}));
+$('restart-no').addEventListener('click', () => send('restart_vote', {round: state.round, poll_id: state.restart_poll?.id, choice: 'no'}));
 $('invite-button').addEventListener('click', async () => {
   const link = location.origin + '/';
   try { await navigator.clipboard.writeText(link); toast('邀请链接已复制，发给另外三位好友即可。'); }
@@ -412,6 +446,172 @@ $('last-open').addEventListener('click', () => {
   $('last-content').replaceChildren(row, el('p', 'result-note', previousName(state.last_trick.winner) + ' 赢得这一墩。'));
   $('last-dialog').showModal();
 });
+function contractName(key) {
+  const c = state?.contracts[key];
+  return c ? `${c.name} ×${c.multiplier}` : '';
+}
+
+// Use the supplied recordings; synthesize a short countdown tone locally.
+const music = new Audio();
+music.loop = true;
+music.volume = 0.25;
+let audioContext, soundEnabled = true, audioUnlocked = false, currentTrack = '', lastBeep = '';
+try { soundEnabled = localStorage.getItem('tarot-sound') !== 'off'; } catch (_) {}
+function soundLabel() {
+  $('sound-toggle').textContent = !soundEnabled ? '声音已关闭' : !audioUnlocked ? '开启声音' : '声音已开启';
+  $('sound-toggle').setAttribute('aria-pressed', String(soundEnabled && audioUnlocked));
+}
+function syncMusic() {
+  const track = !state ? '' : state.phase === 'finished' ? 'jiesuanyinyue' : ['playing', 'collecting'].includes(state.phase) ? 'seikobeatclub' : 'leschampselysee';
+  if (track !== currentTrack) {
+    music.pause();
+    currentTrack = track;
+    if (track) { music.src = `/musics/${track}.mp3`; music.load(); }
+    else { music.removeAttribute('src'); music.load(); }
+  }
+  if (!track || !soundEnabled || !audioUnlocked) music.pause();
+  else if (music.paused) music.play().then(() => { $('audio-status').textContent = ''; }).catch(error => {
+    if (error.name === 'NotAllowedError') { audioUnlocked = false; soundLabel(); }
+    else if (error.name !== 'AbortError') $('audio-status').textContent = '音乐暂时无法播放，请检查网络后重新开启声音。';
+  });
+  soundLabel();
+}
+function unlockAudio() {
+  if (!soundEnabled) return;
+  try {
+    audioContext ||= new (window.AudioContext || window.webkitAudioContext)();
+    audioContext.resume().catch(() => {});
+    audioUnlocked = true;
+    syncMusic();
+  } catch (_) { $('audio-status').textContent = '此浏览器不支持提示音。'; }
+}
+document.addEventListener('pointerdown', event => { if (!audioUnlocked && !event.target.closest('#sound-toggle')) unlockAudio(); }, {capture: true});
+document.addEventListener('keydown', event => { if (!audioUnlocked && !event.target.closest('#sound-toggle')) unlockAudio(); }, {capture: true});
+$('sound-toggle').addEventListener('click', () => {
+  if (soundEnabled && audioUnlocked) soundEnabled = false;
+  else { soundEnabled = true; unlockAudio(); }
+  try { localStorage.setItem('tarot-sound', soundEnabled ? 'on' : 'off'); } catch (_) {}
+  syncMusic();
+});
+function countdownBeep(seconds) {
+  if (!soundEnabled || !audioContext || audioContext.state !== 'running') return;
+  const oscillator = audioContext.createOscillator(), gain = audioContext.createGain();
+  oscillator.frequency.value = seconds === 1 ? 1100 : 880;
+  oscillator.connect(gain); gain.connect(audioContext.destination);
+  const now = audioContext.currentTime;
+  gain.gain.setValueAtTime(0, now);
+  gain.gain.linearRampToValueAtTime(0.12, now + 0.015);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+  oscillator.start(now); oscillator.stop(now + 0.2);
+  oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
+}
+
+let socialSeen = 0, socialSession = '';
+function renderExtras() {
+  $('scoreboard').replaceChildren();
+  [...state.players].filter(Boolean).sort((a, b) => b.total - a.total).forEach((p, rank) => {
+    const row = el('div', 'score-row');
+    row.append(el('span', '', `${rank + 1}. ${p.name}`), el('b', '', signed(p.total)));
+    $('scoreboard').append(row);
+  });
+  $('quick-chat').replaceChildren(...state.quick_chats.map(text => actionButton(text, 'chat', {text}, true, false)));
+  const target = $('gift-target').value;
+  $('gift-target').replaceChildren(...state.players.flatMap((p, i) => {
+    if (!p || i === state.seat) return [];
+    const option = el('option', '', p.name); option.value = String(i); return [option];
+  }));
+  if ([...$('gift-target').options].some(o => o.value === target)) $('gift-target').value = target;
+  for (const id of ['flower-button', 'egg-button']) $(id).disabled = !connected || Boolean(pending) || !$('gift-target').options.length;
+  $('social-log').replaceChildren(...state.social_events.slice(-8).map(event => el('p', '', event.kind === 'chat' ? `${event.name}：${event.text}` : `${event.name} ${event.gift === 'flower' ? '💐 送鲜花给' : '🥚 向…投鸡蛋：'} ${event.target_name}`)));
+  $('social-log').scrollTop = $('social-log').scrollHeight;
+  if (socialSession !== state.session_id) { socialSeen = 0; socialSession = state.session_id; }
+  for (const event of state.social_events) {
+    if (event.id <= socialSeen) continue;
+    socialSeen = event.id;
+    if (event.kind === 'gift' && (Date.now() + clockOffset) / 1000 - event.time < 5) {
+      const seat = document.querySelector(`[data-seat="${event.target}"]`);
+      const burst = el('span', 'gift-burst', event.gift === 'flower' ? '💐' : '🥚');
+      if (seat) { seat.append(burst); setTimeout(() => burst.remove(), 2400); }
+    }
+  }
+}
+$('flower-button').addEventListener('click', () => send('gift', {target: Number($('gift-target').value), gift: 'flower'}));
+$('egg-button').addEventListener('click', () => send('gift', {target: Number($('gift-target').value), gift: 'egg'}));
+
+let inspectMode = 'tricks', inspectSeat = 0;
+function renderInspection() {
+  $('inspect-tabs').replaceChildren();
+  const content = $('inspect-content'); content.replaceChildren();
+  const previousName = i => state.result?.players?.[i]?.name || name(i);
+  if (inspectMode !== 'tricks') {
+    $('inspect-title').textContent = inspectMode === 'kitty' ? '本局底牌' : '我的扣牌';
+    const cards = inspectMode === 'kitty' ? state.kitty : state.discard;
+    const row = el('div', 'mini-hand'); row.append(...cards.map(c => cardElement(c)));
+    content.append(row, el('p', 'result-note', cards.length ? '本局记录，随时可回看。' : '当前没有可查看的牌。'));
+    return;
+  }
+  $('inspect-title').textContent = '查看已收的墩';
+  state.players.forEach((p, i) => {
+    if (!p) return;
+    const button = el('button', 'button quiet', previousName(i));
+    button.setAttribute('aria-pressed', String(inspectSeat === i));
+    button.addEventListener('click', () => { inspectSeat = i; renderInspection(); });
+    $('inspect-tabs').append(button);
+  });
+  state.tricks.forEach((trick, index) => {
+    if (trick.winner !== inspectSeat) return;
+    const section = el('section', 'history-trick');
+    section.append(el('h3', '', `第 ${index + 1} 墩 · ${previousName(inspectSeat)} 收墩`));
+    const row = el('div', 'mini-hand');
+    for (const play of trick.plays) {
+      if (play.card === 'F' && play.seat !== trick.winner) continue;
+      const item = el('div'); item.append(cardElement(play.card), el('small', '', previousName(play.seat))); row.append(item);
+    }
+    section.append(row);
+    if (trick.kept_fool !== null && trick.kept_fool !== undefined) section.append(el('p', 'result-note', `愚人由 ${previousName(trick.kept_fool)} 保留，并补 0.5 分（同阵营内部补牌不改变阵营总分）。`));
+    content.append(section);
+  });
+  const ownFool = state.tricks.find(t => t.kept_fool === inspectSeat);
+  if (ownFool) { const section = el('section', 'history-trick'); section.append(el('h3', '', '保留的愚人'), cardElement('F')); content.append(section); }
+  if (state.result?.contract === 'jiedi' && state.result.reserve_owner === inspectSeat) {
+    const section = el('section', 'history-trick');
+    const cards = el('div', 'mini-hand'); cards.append(...state.discard.map(c => cardElement(c)));
+    section.append(el('h3', '', 'Jiedi · 末墩收下的扣牌'), cards); content.append(section);
+  }
+  if (!content.children.length) content.append(el('p', 'result-note', '这位玩家尚未收墩。'));
+}
+for (const [id, mode] of [['history-open', 'tricks'], ['kitty-open', 'kitty'], ['discard-open', 'discard']]) {
+  $(id).addEventListener('click', () => { inspectMode = mode; inspectSeat = state.seat; renderInspection(); $('inspect-dialog').showModal(); });
+}
+
+const AWARDS = {
+  streak: ['😰', 'TA的连胜，我很怕', '连续三场游戏获胜，播报后重新计数。'],
+  taker: ['😡', '不要，妨碍我', '两次成为庄家并获胜；当庄失败或播报后重新计数。'],
+  turtle: ['🐢', '玄武制胜', '连续五次发牌都不叫分。拿出勇气来！'],
+  bidder: ['🙋', '我叫，我再叫！', '连续三次发牌叫分，播报后重新计数。']
+};
+let awardQueue = [], awardSeen = 0, awardSession = '';
+try { const saved = JSON.parse(sessionStorage.getItem('tarot-awards') || '{}'); awardSeen = saved.seen || 0; awardSession = saved.session || ''; } catch (_) {}
+function receiveAwards() {
+  // A room reset can reuse round numbers, so announcements use their own epoch.
+  const session = `${state.session_id}:${state.award_epoch}`;
+  if (awardSession !== session) { awardSeen = 0; awardQueue = []; awardSession = session; $('award-dialog').close(); }
+  for (const event of state.announcements) {
+    if (event.id > awardSeen) { awardSeen = event.id; awardQueue.push(event); }
+  }
+  try { sessionStorage.setItem('tarot-awards', JSON.stringify({session: awardSession, seen: awardSeen})); } catch (_) {}
+  showNextAward();
+}
+function showNextAward() {
+  if ($('award-dialog').open || !awardQueue.length || !state) return;
+  const event = awardQueue.shift(), definition = AWARDS[event.kind];
+  if (!definition) return;
+  $('award-emoji').textContent = definition[0]; $('award-title').textContent = definition[1];
+  $('award-names').textContent = event.names.join('、'); $('award-detail').textContent = definition[2];
+  $('award-dialog').showModal();
+}
+$('award-close').addEventListener('click', () => $('award-dialog').close());
+$('award-dialog').addEventListener('close', () => { if (state) showNextAward(); });
 window.addEventListener('online', () => { if (!intentionalClose && token && (!ws || ws.readyState === WebSocket.CLOSED)) connect(); });
 window.addEventListener('storage', event => {
   if (event.key === 'tarot-seat-token' && token && event.oldValue === token && event.newValue !== token) {

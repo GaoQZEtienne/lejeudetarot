@@ -90,6 +90,8 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
 
     async def take(self):
         await self.act(self.room.game.data['turn'], 'bid', {'bid': 'take'})
+        while self.room.game.data['phase'] == 'bidding':
+            await self.act(self.room.game.data['turn'], 'bid', {'bid': 'pass'})
         taker = self.room.game.data['taker']
         choice = auto_discard(self.peers[taker].state['hand'])
         await self.act(taker, 'discard', {'cards': choice})
@@ -146,6 +148,8 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         await self.start()
         taker = self.room.game.data['turn']
         await self.act(taker, 'bid', {'bid': 'take'})
+        while self.room.game.data['phase'] == 'bidding':
+            await self.act(self.room.game.data['turn'], 'bid', {'bid': 'pass'})
         selected = auto_discard(self.peers[taker].state['hand'])[:3]
         deadline = self.room.deadline
         await self.act(taker, 'draft', {'cards': selected})
@@ -164,7 +168,7 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         await self.peers[0].wait(lambda s: len(s['trick']) == 1)
         self.assertIn(self.room.game.data['trick'][0]['card'], legal)
 
-    async def test_duplicate_connection_pause_and_storage_restore(self):
+    async def test_duplicate_connection_pause_and_service_restart_clears_room(self):
         await self.start()
         await self.take()
         twin = await self.connect(self.tokens[0])
@@ -176,15 +180,18 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
             await peer.close()
         self.assertTrue(self.room.paused)
         self.assertIsNone(self.room.deadline)
-        # A fresh service instance reads the committed snapshot and stays paused until connected.
+        # Reconnecting a tab preserves hands, but restarting the service clears all identities.
         restored_storage = Storage(self.db)
         restored = Room(restored_storage)
-        self.assertEqual(restored.game.data['hands'][0], saved_hand)
-        self.assertEqual(restored.identify(self.tokens[0]), 0)
+        self.assertEqual(restored.game.data['hands'][0], [])
+        self.assertIsNone(restored.identify(self.tokens[0]))
+        self.assertEqual(restored.players, [None] * 4)
+        self.assertEqual(restored.game.data['phase'], 'lobby')
         self.assertTrue(restored.paused)
         self.assertIsNone(restored.deadline)
         restored_storage.close()
         self.peers = [await self.connect(token) for token in self.tokens]
+        self.assertEqual(self.peers[0].state['hand'], saved_hand)
         self.assertFalse(self.room.paused)
         self.assertGreater(self.room.deadline, time.time())
 
@@ -270,33 +277,113 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         round_number = self.room.game.data['round']
         deadline = self.room.deadline
         original_revision = self.room.revision
-        totals = [p['total2'] for p in self.room.players]
+        self.room.players[0]['total2'] = 300
         self.assertEqual((await self.peers[0].act('restart_vote', {'round': round_number}))['type'], 'ack')
         self.assertEqual(self.room.deadline, deadline)
-        self.assertEqual(self.room.game.data['restart_votes'], [0])
+        poll = self.room.game.data['restart_poll']
+        self.assertEqual(poll['yes'], [0])
+        self.assertAlmostEqual(poll['deadline'] - time.time(), 20, delta=1)
+        ballot = {'round': round_number, 'poll_id': poll['id']}
         # Two tabs of one player still provide only one vote.
         twin = await self.connect(self.tokens[0])
-        self.assertEqual((await twin.act('restart_vote', {'round': round_number}))['type'], 'ack')
+        self.assertEqual((await twin.act('restart_vote', ballot))['type'], 'ack')
         await twin.close()
         self.assertEqual(self.room.game.data['round'], round_number)
-        self.assertEqual(self.room.game.data['restart_votes'], [0])
+        self.assertEqual(self.room.game.data['restart_poll']['yes'], [0])
         saved = self.room.storage.load()
-        self.assertEqual(saved['game']['restart_votes'], [0])
+        self.assertEqual(saved['game']['restart_poll']['yes'], [0])
         # A concurrently submitted second vote can use the original revision.
-        response = await self.peers[1].act('restart_vote', {'round': round_number}, revision=original_revision)
+        response = await self.peers[1].act('restart_vote', ballot, revision=original_revision)
         self.assertEqual(response['type'], 'ack')
         s = self.room.game.data
-        self.assertEqual(s['round'], round_number + 1)
-        self.assertEqual(s['phase'], 'bidding')
-        self.assertEqual(s.get('restart_votes', []), [])
+        self.assertEqual(s['round'], 0)
+        self.assertEqual(s['phase'], 'lobby')
+        self.assertIsNone(s['restart_poll'])
         self.assertEqual(s['tricks'], [])
         self.assertEqual(s['discard'], [])
-        self.assertEqual([len(h) for h in s['hands']], [18] * 4)
-        self.assertEqual(len(set(sum(s['hands'], []) + s['kitty'])), 78)
-        self.assertEqual([p['total2'] for p in self.room.players], totals)
+        self.assertEqual([len(h) for h in s['hands']], [0] * 4)
+        self.assertEqual(s['kitty'], [])
+        self.assertEqual([p['total2'] for p in self.room.players], [0] * 4)
         response = await self.peers[2].act('restart_vote', {'round': round_number})
         self.assertEqual(response['type'], 'error')
         self.assertEqual(s.get('restart_votes', []), [])
+
+    async def test_vote_rejection_timeout_cooldown_and_old_ballot(self):
+        await self.start()
+        await self.act(0, 'restart_vote', {'round': 1})
+        ballot = {'poll_id': self.room.game.data['restart_poll']['id'], 'choice': 'no'}
+        for seat in [1, 2, 3]:
+            await self.act(seat, 'restart_vote', ballot)
+        self.assertIsNone(self.room.game.data['restart_poll'])
+        self.assertAlmostEqual(self.room.game.data['restart_cooldown'] - time.time(), 120, delta=1)
+        self.assertEqual((await self.peers[0].act('restart_vote', {'round': 1}))['type'], 'error')
+        async with self.room.lock:
+            self.room.game.data['restart_cooldown'] = time.time() - 1
+        await self.act(0, 'restart_vote', {'round': 1})
+        self.assertEqual((await self.peers[1].act('restart_vote', {**ballot, 'choice': 'yes'}))['type'], 'error')
+        async with self.room.lock:
+            self.room.game.data['restart_poll']['deadline'] = time.time() - 1
+        await self.peers[1].wait(lambda s: s['restart_poll'] is None)
+        self.assertGreater(self.room.game.data['restart_cooldown'], time.time() + 118)
+        self.assertEqual(self.room.game.data['phase'], 'bidding')
+
+    async def test_hidden_contract_privacy_and_public_history(self):
+        for contract in ['sans', 'contre']:
+            async with self.room.lock:
+                self.room.transaction(self.room.reset_to_lobby)
+                await self.room.broadcast()
+            await self.start()
+            taker = self.room.game.data['turn']
+            hand = list(self.room.game.data['hands'][taker])
+            await self.act(taker, 'bid', {'bid': contract})
+            while self.room.game.data['phase'] == 'bidding':
+                await self.act(self.room.game.data['turn'], 'bid', {'bid': 'pass'})
+            self.assertEqual(self.room.game.data['hands'][taker], hand)
+            for peer in self.peers:
+                self.assertEqual(peer.state['kitty'], [])
+                self.assertEqual(peer.state['discard'], [])
+            for _ in range(4):
+                seat = self.room.game.data['turn']
+                await self.act(seat, 'play', {'card': self.peers[seat].state['legal'][0]})
+            await self.peers[0].wait(lambda s: s['completed'] == 1)
+            for peer in self.peers:
+                await peer.wait(lambda s: s['completed'] == 1)
+                self.assertEqual(len(peer.state['tricks'][0]['plays']), 4)
+                self.assertEqual(peer.state['kitty'], [])
+        self.assertEqual(self.room.durations['playing'], 60)
+
+    async def test_chat_gifts_and_music_routes(self):
+        deadline = self.room.deadline
+        await self.act(0, 'chat', {'text': '这啥牌'})
+        self.assertEqual(self.peers[3].state['social_events'][-1]['text'], '这啥牌')
+        self.assertEqual(self.room.deadline, deadline)
+        self.assertEqual((await self.peers[0].act('chat', {'text': 'spam'}))['type'], 'error')
+        self.assertEqual((await self.peers[1].act('chat', {'text': '<script>'}))['type'], 'error')
+        await self.act(1, 'gift', {'target': 0, 'gift': 'flower'})
+        self.assertEqual(self.peers[2].state['social_events'][-1]['target_name'], '玩家1')
+        self.assertEqual((await self.peers[2].act('gift', {'target': 2, 'gift': 'egg'}))['type'], 'error')
+        await self.act(2, 'gift', {'target': 3, 'gift': 'egg'})
+        for filename in ['leschampselysee', 'seikobeatclub', 'jiesuanyinyue']:
+            response = await self.client.get(f'/musics/{filename}.mp3', headers={'Range': 'bytes=0-1023'})
+            self.assertEqual(response.status, 206)
+            self.assertEqual(len(await response.read()), 1024)
+        self.assertEqual((await self.client.get('/musics/unknown.mp3')).status, 404)
+
+    async def test_private_discard_and_award_names(self):
+        await self.start()
+        async with self.room.lock:
+            for stats in self.room.game.data['stats']:
+                stats['passes'] = 4
+        for _ in range(4):
+            await self.act(self.room.game.data['turn'], 'bid', {'bid': 'pass'})
+        event = self.peers[0].state['announcements'][-1]
+        self.assertEqual(event['kind'], 'turtle')
+        self.assertEqual(event['names'], ['玩家1', '玩家2', '玩家3', '玩家4'])
+        await self.take()
+        taker = self.room.game.data['taker']
+        for i, peer in enumerate(self.peers):
+            self.assertEqual(len(peer.state['kitty']), 6)
+            self.assertEqual(len(peer.state['discard']), 6 if i == taker else 0)
 
     async def test_finished_leave_preserves_result_names_and_allows_replacement(self):
         await self.start()

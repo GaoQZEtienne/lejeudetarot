@@ -17,10 +17,12 @@ from aiohttp import WSMsgType, web
 from game.rules import RuleError, discard_options, lead_suit, legal_plays
 from game.state import Game
 from game.storage import Storage
+from game.contracts import CONTRACTS
 
 ROOT = Path(__file__).resolve().parent
 LOG = logging.getLogger('tarot')
 OUTSIDE_PHASES = ('lobby', 'finished')
+QUICK_CHATS = ['这啥牌', '放心出', '快点吧！', '666', '坏大事', '将牌狂欢！', '我滴任务完成辣！']
 
 
 def token_hash(token):
@@ -30,12 +32,16 @@ def token_hash(token):
 class Room:
     def __init__(self, storage, durations=None):
         self.storage = storage
-        saved = storage.load() or {}
-        self.game = Game(saved.get('game'))
-        self.players = saved.get('players', [None] * 4)
-        self.host = saved.get('host', None)
-        self.revision = saved.get('revision', 0)
-        self.durations = dict(bidding=30, discard=90, playing=30, collecting=2)
+        # Starting the service intentionally starts a fresh room (modi.md).
+        self.game = Game()
+        self.players = [None] * 4
+        self.host = None
+        self.revision = 0
+        self.session_id = secrets.token_urlsafe(16)
+        self.social_events = []
+        self.social_serial = 0
+        self.social_times = [0.0] * 4
+        self.durations = dict(bidding=30, discard=90, playing=60, collecting=2)
         self.durations.update(durations or {})
         self.connections = [set() for _ in range(4)]
         self.close_tasks = set()
@@ -43,6 +49,7 @@ class Room:
         self.deadline = None
         self.lock = asyncio.Lock()
         self.paused = True
+        self.save()
 
     def snapshot(self):
         return dict(game=deepcopy(self.game.data), players=deepcopy(self.players), host=self.host,
@@ -68,7 +75,10 @@ class Room:
                 for player, score in zip(self.players, self.game.data['result']['scores']):
                     player['total2'] += round(score * 2)
                 self.freeze_result_players()
-                self.game.data['restart_votes'] = []
+                self.game.data['restart_poll'] = None
+            for event in self.game.data['announcements']:
+                if 'names' not in event:
+                    event['names'] = [self.players[i]['name'] for i in event['seats']]
             self.revision += 1
             if reset_clock:
                 self.set_deadline()
@@ -97,11 +107,13 @@ class Room:
         def apply():
             self.freeze_result_players()
             self.players[seat] = None
+            self.game.data['stats'][seat] = dict(wins=0, taker_wins=0, calls=0, passes=0)
             if self.host == seat:
                 remaining = [i for i, p in enumerate(self.players) if p]
                 self.host = next((i for i in remaining if self.online(i)), next(iter(remaining), None))
             if not any(self.players):
                 self.game = Game()
+                self.social_events = []
         self.transaction(apply, reset_clock=False)
         return True
 
@@ -122,6 +134,7 @@ class Room:
             self.freeze_result_players()
             self.players[seat] = dict(name=name, token_hash=token_hash(token), total2=0,
                                       joined_round=self.game.data['round'])
+            self.social_times[seat] = 0
             if self.host is None:
                 self.host = seat
         self.transaction(apply, reset_clock=False)
@@ -148,18 +161,24 @@ class Room:
                 count=len(s['hands'][i]), total=p['total2'] / 2,
                 played_this_round=played,
                 tricks=sum(t['winner'] == i for t in s['tricks']) if played else 0))
-        public_kitty = s['kitty'] if s['phase'] not in ('lobby', 'bidding') else []
-        return dict(type='state', revision=self.revision, seat=seat, host=self.host, players=players,
+        public_kitty = s['kitty'] if s['kitty_revealed'] or s['phase'] == 'finished' else []
+        return dict(type='state', revision=self.revision, session_id=self.session_id,
+            seat=seat, host=self.host, players=players,
             phase=s['phase'], round=s['round'], turn=s['turn'], taker=s['taker'], first=s['first'],
             passed=list(s['passed']), hand=hand, legal=legal, reasons=reasons, kitty=public_kitty,
             exposed_trumps=list(s['exposed_trumps']), trick=deepcopy(s['trick']),
             last_trick=deepcopy(s['tricks'][-1]) if s['tricks'] else None,
             trick_number=min(18, len(s['tricks']) + 1), completed=len(s['tricks']),
             lead=lead_suit(s['trick']), draft=list(s['draft']) if seat == s['taker'] else [],
-            discard=list(s['discard']) if s['phase'] == 'finished' else [],
+            discard=list(s['discard']) if s['phase'] == 'finished' or seat == s['taker'] else [],
             result=deepcopy(s['result']), notice=s['notice'], deadline=self.deadline,
             server_time=time.time(), paused=self.paused,
-            restart_votes=list(s.get('restart_votes', [])),
+            restart_poll=deepcopy(s['restart_poll']), restart_cooldown=s['restart_cooldown'],
+            contract=s['contract'], contracts=CONTRACTS, bids=s['bids'],
+            kitty_revealed=s['kitty_revealed'], tricks=deepcopy(s['tricks']),
+            announcements=deepcopy(s['announcements']), award_epoch=s['award_epoch'],
+            social_events=deepcopy(self.social_events),
+            quick_chats=QUICK_CHATS,
             duration=self.durations.get(s['phase'], 0))
 
     async def send(self, ws, data):
@@ -189,8 +208,9 @@ class Room:
                 await self.broadcast()
 
     def advance_if_due(self):
+        changed = self.expire_poll()
         if self.deadline is None or time.time() < self.deadline:
-            return False
+            return changed
         phase = self.game.data['phase']
         def apply():
             self.game.timeout()
@@ -199,28 +219,86 @@ class Room:
         self.transaction(apply)
         return True
 
+    def fail_poll(self):
+        s = self.game.data
+        s['restart_poll'] = None
+        s['restart_cooldown'] = time.time() + 120
+        s['notice'] = '重开投票未通过，120 秒后可再次发起。'
+
+    def expire_poll(self):
+        poll = self.game.data['restart_poll']
+        if poll and time.time() >= poll['deadline']:
+            self.transaction(self.fail_poll, reset_clock=False)
+            return True
+        return False
+
+    def reset_to_lobby(self):
+        self.game = Game()
+        self.game.data['notice'] = '重开投票通过，积分榜已清空。等待房主重新开始。'
+        for player in self.players:
+            if player:
+                player['total2'] = 0
+                player['joined_round'] = 0
+        self.social_events = []
+
+    def social_action(self, seat, action, payload):
+        now = time.time()
+        if now - self.social_times[seat] < 1.5:
+            raise RuleError('稍等一下再发送')
+        event = dict(id=self.social_serial + 1, seat=seat, name=self.players[seat]['name'], time=now, kind=action)
+        if action == 'chat':
+            if payload.get('text') not in QUICK_CHATS:
+                raise RuleError('只能发送预设快捷语')
+            event['text'] = payload['text']
+        else:
+            target = payload.get('target')
+            if type(target) is not int or target not in range(4) or target == seat or not self.players[target]:
+                raise RuleError('请选择另一位已入座玩家')
+            if payload.get('gift') not in ('flower', 'egg'):
+                raise RuleError('只能赠送鲜花或鸡蛋')
+            event.update(target=target, target_name=self.players[target]['name'], gift=payload['gift'])
+        self.social_times[seat] = now
+        self.social_serial += 1
+        self.social_events.append(event)
+        self.social_events = self.social_events[-30:]
+
     def handle_action(self, seat, data):
         action = data.get('action')
         payload = data.get('payload', {})
         if not isinstance(payload, dict):
             raise RuleError('操作格式不正确')
+        if action in ('chat', 'gift'):
+            self.social_action(seat, action, payload)
+            return
         if action == 'restart_vote':
+            self.expire_poll()
             s = self.game.data
             if s['phase'] in OUTSIDE_PHASES:
                 raise RuleError('只有局内可以发起重开投票')
-            if payload.get('round') != s['round']:
-                raise RuleError('已经重新发牌，上一局的投票已失效')
-            votes = s.get('restart_votes', [])
-            if seat in votes:
+            if time.time() < s['restart_cooldown']:
+                raise RuleError('投票冷却中，请稍后再试')
+            choice = payload.get('choice', 'yes')
+            if choice not in ('yes', 'no'):
+                raise RuleError('请选择同意或拒绝')
+            poll = s['restart_poll']
+            if poll:
+                if payload.get('poll_id') != poll['id']:
+                    raise RuleError('投票已更新，请按最新画面投票')
+            elif payload.get('poll_id') is not None or payload.get('round') != s['round'] or choice != 'yes':
+                raise RuleError('请发起新投票')
+            if poll and (seat in poll['yes'] or seat in poll['no']):
                 return
-
             def vote():
-                s.setdefault('restart_votes', []).append(seat)
-                if len(s['restart_votes']) >= 2:
-                    self.game.new_deal('两名玩家赞成重开，原局不计分，重新发牌。')
-            # Votes may arrive together or between plays. Scope them to this
-            # deal, rather than rejecting the second voter for an older revision.
-            self.transaction(vote, reset_clock=len(votes) >= 1)
+                if not s['restart_poll']:
+                    s['restart_poll'] = dict(id=secrets.token_urlsafe(12), deadline=time.time() + 20, yes=[], no=[])
+                current = s['restart_poll']
+                current[choice].append(seat)
+                if len(current['yes']) >= 2:
+                    self.reset_to_lobby()
+                elif len(current['no']) >= 3:
+                    self.fail_poll()
+            passing = bool(poll and len(poll['yes']) == 1 and choice == 'yes')
+            self.transaction(vote, reset_clock=passing)
             return
         if data.get('revision') != self.revision:
             raise RuleError('牌局状态已更新，请按最新画面重新操作')
@@ -239,7 +317,7 @@ class Room:
         while True:
             await asyncio.sleep(0.2)
             async with self.lock:
-                changed = False
+                changed = self.expire_poll()
                 if self.game.data['phase'] in ('lobby', 'finished') and self.host is not None:
                     if not self.online(self.host) and time.time() - self.offline_since[self.host] >= 30:
                         candidate = next((i for i in range(4) if self.online(i)), None)
@@ -281,7 +359,7 @@ async def health(request):
 
 async def lobby(request):
     room = request.app[ROOM_KEY]
-    return web.json_response({'occupied': sum(p is not None for p in room.players)})
+    return web.json_response({'occupied': sum(p is not None for p in room.players), 'session_id': room.session_id})
 
 
 async def join(request):
@@ -418,6 +496,10 @@ def create_app(db_path=None, durations=None):
         async def asset(request, name=filename):
             return web.FileResponse(ROOT / 'static' / name)
         app.router.add_get('/' + filename, asset)
+    for filename in ('leschampselysee.mp3', 'seikobeatclub.mp3', 'jiesuanyinyue.mp3'):
+        async def music(request, name=filename):
+            return web.FileResponse(ROOT / 'musics' / name)
+        app.router.add_get('/musics/' + filename, music)
     app.cleanup_ctx.append(lifecycle)
     app.on_shutdown.append(shutdown)
     return app

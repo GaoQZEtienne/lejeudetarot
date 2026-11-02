@@ -4,6 +4,8 @@ from unittest.mock import patch
 from game.cards import BOUTS, deal, deck, petit_sec, points2
 from game.rules import RuleError, auto_discard, legal_plays, trick_winner, validate_discard
 from game.scoring import score_numbers
+from game.scoring import settle
+from game.contracts import CONTRACTS
 from game.state import Game
 
 
@@ -60,6 +62,8 @@ class RulesTests(unittest.TestCase):
         original = list(game.data['hands'][seat])
         kitty = list(game.data['kitty'])
         game.action(seat, 'bid', {'bid': 'take'})
+        while game.data['phase'] == 'bidding':
+            game.timeout()
         self.assertEqual(game.data['hands'][seat], original)
         with self.assertRaises(RuleError):
             game.action(seat, 'discard', {'cards': kitty})
@@ -86,17 +90,21 @@ class RulesTests(unittest.TestCase):
                          tricks=[{'winner': past_winner, 'plays': plays('S1', 'S2', 'S3', 'S4')}] * past)
         return game
 
-    def test_fool_compensation_and_final_switch(self):
+    def test_fool_compensation_including_final_trick(self):
         game = self.make_trick(('F', 'S1', 'S14', 'S2'))
         game.collect()
         self.assertIn('F', game.data['captured'][0])
         self.assertEqual(game.data['adjust2'], [-1, 1])
-        # Defense plays F in final trick; defense wins it, but F still changes to taker.
+        # The final-trick fool stays with its owner, including within defense.
         game = self.make_trick(('S1', 'F', 'S14', 'S2'), past=17, past_winner=0)
         game.collect()
         self.assertEqual(game.data['tricks'][-1]['winner'], 2)
-        self.assertIn('F', game.data['captured'][0])
+        self.assertIn('F', game.data['captured'][1])
         self.assertEqual(game.data['adjust2'], [0, 0])
+        game = self.make_trick(('F', 'S1', 'S14', 'S2'), past=17, past_winner=2)
+        game.collect()
+        self.assertIn('F', game.data['captured'][0])
+        self.assertEqual(game.data['adjust2'], [-1, 1])
 
     def test_fool_slam_and_penultimate_petit(self):
         game = self.make_trick(('F', 'S14', 'S1', 'S2'), past=17, past_winner=0)
@@ -114,15 +122,18 @@ class RulesTests(unittest.TestCase):
         self.assertEqual(score_numbers(41, 2, 0)['delta'], 0)
 
     def test_complete_games_conserve_cards_and_points(self):
-        for _ in range(20):
+        for iteration in range(30):
             game = Game()
             game.new_deal()
-            game.action(game.data['turn'], 'bid', {'bid': 'take'})
+            contract = list(CONTRACTS)[iteration % 5]
+            game.action(game.data['turn'], 'bid', {'bid': contract})
+            while game.data['phase'] == 'bidding':
+                game.timeout()
             game.timeout()
             while game.data['phase'] != 'finished':
                 game.timeout()
             s = game.data
-            cards = sum(s['captured'], []) + s['discard']
+            cards = sum(s['captured'], []) + (s['discard'] if CONTRACTS[contract]['exchange'] else s['kitty'])
             self.assertEqual(len(s['tricks']), 18)
             self.assertEqual(len(cards), 78)
             self.assertEqual(set(cards), set(deck()))
@@ -130,6 +141,79 @@ class RulesTests(unittest.TestCase):
             self.assertEqual(sum(s['result']['scores']), 0)
             self.assertEqual(sum(len(h) for h in s['hands']), 0)
             self.assertEqual(len(BOUTS & set(cards)), 3)
+            self.assertEqual(s['result']['multiplier'], CONTRACTS[contract]['multiplier'])
+
+    def test_repeated_bidding_and_maximum_contract(self):
+        game = Game()
+        game.new_deal()
+        first = game.data['turn']
+        for bid in ['prise', 'garde', 'pass', 'pass', 'jiedi', 'sans', 'contre']:
+            if bid == 'jiedi':
+                self.assertEqual(game.data['turn'], first)
+                with self.assertRaises(RuleError):
+                    game.action(first, 'bid', {'bid': 'garde'})
+            game.action(game.data['turn'], 'bid', {'bid': bid})
+        self.assertEqual(game.data['phase'], 'playing')
+        self.assertEqual(game.data['taker'], first)
+        self.assertEqual(game.data['contract'], 'contre')
+        self.assertFalse(game.data['kitty_revealed'])
+
+    def test_reserve_scoring_and_contract_multipliers(self):
+        game = Game()
+        game.new_deal()
+        game.action(game.data['turn'], 'bid', {'bid': 'jiedi'})
+        while game.data['phase'] != 'finished':
+            game.timeout()
+        s = game.data
+        taker = s['taker']
+        reserve = sum(points2(c) for c in s['discard']) / 2
+        s['tricks'][-1]['winner'] = taker
+        won_reserve = settle(s)
+        s['tricks'][-1]['winner'] = (taker + 1) % 4
+        lost_reserve = settle(s)
+        self.assertEqual(won_reserve['points'] - lost_reserve['points'], reserve)
+        self.assertEqual(lost_reserve['reserve_owner'], (taker + 1) % 4)
+        s['contract'] = 'sans'
+        sans = settle(s)
+        s['contract'] = 'contre'
+        contre = settle(s)
+        self.assertEqual(sans['points'] - contre['points'], sum(points2(c) for c in s['kitty']) / 2)
+        self.assertEqual(score_numbers(45, 2, 0, petit=10, multiplier=3)['unit'], 117)
+        self.assertEqual(score_numbers(45, 2, 0, slam=200, multiplier=6)['unit'], 374)
+
+    def test_achievement_counts_and_resets(self):
+        game = Game()
+        game.new_deal()
+        for _ in range(20):
+            game.timeout()
+        self.assertEqual(game.data['round'], 6)
+        self.assertEqual(game.data['announcements'][-1]['kind'], 'turtle')
+        self.assertEqual(game.data['announcements'][-1]['seats'], [0, 1, 2, 3])
+        self.assertTrue(all(stats['passes'] == 0 for stats in game.data['stats']))
+        for _ in range(3):
+            game.data['turn'] = 0
+            game.action(0, 'bid', {'bid': 'prise'})
+            while game.data['phase'] == 'bidding':
+                game.timeout()
+            game.new_deal()
+        self.assertEqual(game.data['announcements'][-1]['kind'], 'bidder')
+        self.assertEqual(game.data['stats'][0]['calls'], 0)
+        s = game.data
+        s.update(taker=0, result={'won': True})
+        game.finish_awards()
+        # A defense win keeps player 0's streak and does not reset taker wins.
+        s.update(taker=1, result={'won': False})
+        game.finish_awards()
+        s.update(taker=0, result={'won': True})
+        game.finish_awards()
+        self.assertEqual([e['kind'] for e in s['announcements'][-2:]], ['streak', 'taker'])
+        self.assertEqual(s['stats'][0]['wins'], 0)
+        self.assertEqual(s['stats'][0]['taker_wins'], 0)
+        game.finish_awards()
+        s['result']['won'] = False
+        game.finish_awards()
+        self.assertEqual(s['stats'][0]['wins'], 0)
+        self.assertEqual(s['stats'][0]['taker_wins'], 0)
 
 
 if __name__ == '__main__':

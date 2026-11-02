@@ -5,3 +5,6 @@ data/
 .env
 artifacts/
 .tmp/
+.agents/
+.codex/
+.aws/

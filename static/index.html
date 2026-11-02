@@ -38,7 +38,7 @@
         <p id="resume-note" class="resume-note" hidden>你已离开牌桌，座位已保留。局中离开会按原计时自动出牌；四人都离开时暂停。</p>
         <p id="join-error" class="error-text" role="alert"></p>
         <div class="join-note"><span aria-hidden="true">↻</span> 暂时离开也没关系，用原浏览器打开即可回到座位。</div>
-        <div class="join-footer">仅 Petit ×1 <span>·</span> 自动计分 <span>·</span> 好友同桌</div>
+        <div class="join-footer">Prise 至 Garde contre <span>·</span> 自动计分 <span>·</span> 好友同桌</div>
       </div>
     </section>
 
@@ -51,10 +51,11 @@
         <div id="seats"></div>
         <div id="table-center" class="table-center"></div>
         <div id="trick-cards" class="trick-cards"></div>
-        <div class="table-caption">JEU DE TAROT <span>✦</span> PETIT ×1</div>
+        <div class="table-caption">JEU DE TAROT <span>✦</span> <span id="contract-label">等待叫分</span></div>
       </div>
       <div class="below-table"><span id="notice" role="status"></span><button id="last-open" class="text-button" disabled>查看上一墩 ↗</button></div>
-      <div id="restart-panel" class="restart-panel" hidden><span id="restart-status" role="status">两人赞成即重新发牌，本局不计分。</span><button id="restart-button" class="button quiet">重开投票</button></div>
+      <div id="restart-panel" class="restart-panel" hidden><span id="restart-status" role="status"></span><div class="actions"><button id="restart-button" class="button quiet">重开投票</button><button id="restart-no" class="button quiet" hidden>拒绝重开</button></div></div>
+      <div class="room-tools"><button id="history-open" class="button quiet">查看已收的墩</button><button id="kitty-open" class="button quiet" hidden>查看公开底牌</button><button id="discard-open" class="button quiet" hidden>查看我的扣牌</button><button id="sound-toggle" class="button quiet" aria-pressed="false">开启声音</button><span id="audio-status" role="status"></span></div>
 
       <section id="kitty-panel" class="kitty-panel" hidden aria-label="公开底牌">
         <div><span class="eyebrow">LE CHIEN</span><h2>六张底牌</h2><p id="kitty-note">先扣原手牌，再收入底牌。</p></div><div id="kitty-cards" class="mini-hand"></div>
@@ -68,6 +69,10 @@
         <div id="hand" class="hand" aria-label="我的手牌"></div>
         <div class="action-bar"><span id="selection-note"></span><div id="actions" class="actions"></div></div>
       </section>
+      <section class="room-extras" aria-label="积分与互动">
+        <div class="scoreboard"><h2>积分榜</h2><div id="scoreboard"></div></div>
+        <div class="social-panel"><h2>同桌闲聊</h2><div id="quick-chat" class="quick-chat"></div><div class="gift-controls"><label for="gift-target">送给</label><select id="gift-target" aria-label="赠送对象"></select><button id="flower-button" class="button quiet">💐 鲜花</button><button id="egg-button" class="button quiet">🥚 鸡蛋</button></div><div id="social-log" class="social-log" role="log" aria-live="polite"></div></div>
+      </section>
     </section>
   </main>
 
@@ -77,18 +82,22 @@
   <dialog id="rules-dialog" class="dialog">
     <div class="dialog-heading"><div><span class="eyebrow">LES RÈGLES</span><h2>这张牌桌的规则</h2></div><button class="icon-button" data-close="rules-dialog" aria-label="关闭玩法说明">×</button></div>
     <div class="rules-body">
-      <p><b>一对三。</b>第一位叫 Petit 的玩家成为庄家，其余三位组成防守方。四人都不叫则重新发牌。首位行动者随机，随后逆时针出牌。</p>
+      <p><b>一对三与循环叫分。</b>Prise ×1、Garde ×2、Jiedi ×3、Garde sans ×4、Garde contre ×6。只能加叫更高合同，不叫后退出本轮竞价；其余人均退出时最高者当庄，叫到 ×6 立即定庄。四人均不叫则重发。首位行动者随机，随后逆时针。</p>
       <p><b>先扣后收。</b>底牌公开，庄家从原来的 18 张手牌中扣六张，再收入全部底牌。不能扣 R、将牌 1、21 或愚人；普通可扣花色不足六张时才补扣必要的将牌，并公开这些将牌。</p>
+      <p><b>合同与底牌。</b>Prise、Garde 的扣牌计入庄家。Jiedi 同样亮牌换牌，但扣下的六张归最后一墩赢家。Garde sans 不亮不换，隐藏底牌计入庄家；Garde contre 不亮不换，隐藏底牌计入防守方。隐藏底牌只在结算后揭晓。</p>
       <p><b>跟花、缺门出将，不必压大。</b>有首攻花色必须跟；没有则有将出将。即使能压过最大将牌，也能出较小的将牌。愚人可随时出。</p>
       <p><b>谁来收墩？</b>有将牌则最大的将牌赢；否则首攻花色最大的牌赢。花色牌顺序：R、D、C、V、10 至 1。赢家先出下一墩。</p>
-      <p><b>愚人。</b>首出时由下一张定花色。通常保留给原阵营；若对方收墩，原阵营补 0.5 分。末墩打出则转交对方阵营，大满贯例外。</p>
+      <p><b>愚人。</b>首出时由下一张定花色，包括末墩在内始终保留给出牌者；若对方阵营收墩，补偿对方 0.5 分。同阵营玩家之间的补牌不改变阵营得分。保留愚人末墩大满贯例外。</p>
       <div class="rule-targets"><span>0 Bout<b>56 分</b></span><span>1 Bout<b>51 分</b></span><span>2 Bout<b>41 分</b></span><span>3 Bout<b>36 分</b></span></div>
       <p>Bout 指将牌 1、21 和愚人。庄家结算时拥有的 Bout 决定目标，达到即获胜。R/Bout 各 4.5 分，D 3.5、C 2.5、V 1.5，其余 0.5，总牌分 91。</p>
-      <p><b>结算。</b>基础 25 加得失分差；末将奖励 10 分；自然大满贯奖励 200 分。庄家收付三份，防守者各一份，四人成绩总和为零。</p>
-      <p><b>倒计时。</b>叫牌 30 秒、扣牌 90 秒、每次出牌 30 秒。到期自动不叫、合法扣牌或随机合法出牌。全员离线时暂停。</p>
+      <p><b>结算。</b>（基础 25 加得失分差，按胜负取正负，再加末将 ±10）乘合同倍数，再加自然大满贯 ±200。庄家收付三份，防守者各一份，四人成绩总和为零。</p>
+      <p><b>倒计时。</b>叫牌 30 秒、扣牌 90 秒、出牌 60 秒，最后 5 秒提示音。到期自动不叫、合法扣牌或随机合法出牌。全员离线时牌局暂停。</p>
+      <p><b>重开。</b>投票限时 20 秒，发起者计一票，两人同意即清空积分并回到入座准备界面；三人拒绝或超时不足两票则失败，冷却 120 秒。投票不暂停出牌计时。服务重启会清空房间与积分，所有人重新填写昵称。</p>
       <p><b>Petit sec。</b>发牌后仅有将牌 1，既无其他将牌也无愚人时，自动重发。</p>
     </div>
   </dialog>
   <dialog id="last-dialog" class="dialog"><div class="dialog-heading"><h2>上一墩</h2><button class="icon-button" data-close="last-dialog" aria-label="关闭上一墩">×</button></div><div id="last-content"></div></dialog>
+  <dialog id="inspect-dialog" class="dialog"><div class="dialog-heading"><h2 id="inspect-title">查看已收的墩</h2><button class="icon-button" data-close="inspect-dialog" aria-label="关闭查牌">×</button></div><div id="inspect-tabs" class="inspect-tabs"></div><div id="inspect-content"></div></dialog>
+  <dialog id="award-dialog" class="dialog award-dialog"><div id="award-emoji" class="award-emoji" aria-hidden="true"></div><h2 id="award-title"></h2><p id="award-names"></p><p id="award-detail" class="result-note"></p><button id="award-close" class="button primary">继续游戏</button></dialog>
 </body>
 </html>

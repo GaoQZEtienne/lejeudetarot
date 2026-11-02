@@ -1,8 +1,10 @@
 from copy import deepcopy
+import secrets
 
 from .cards import RNG, deal, deck, petit_sec, sort_hand
 from .rules import RuleError, auto_discard, legal_plays, trick_winner, validate_discard
 from .scoring import settle
+from .contracts import CONTRACTS
 
 
 class Game:
@@ -10,9 +12,54 @@ class Game:
         self.data = deepcopy(data) if data else dict(phase='lobby', round=0, turn=None,
             hands=[[], [], [], []], kitty=[], discard=[], trick=[], tricks=[], taker=None,
             first=None, passed=[], captured=[[], []], adjust2=[0, 0], draft=[],
-            exposed_trumps=[], result=None, excuse_note='', notice='四位好友入座后，由房主开始。')
+            exposed_trumps=[], result=None, excuse_note='', notice='四位好友入座后，由房主开始。',
+            contract=None, bids=[None] * 4, called=[False] * 4, kitty_revealed=False,
+            stats=[dict(wins=0, taker_wins=0, calls=0, passes=0) for _ in range(4)],
+            announcements=[], announcement_serial=0, award_epoch=secrets.token_hex(8),
+            restart_poll=None, restart_cooldown=0)
+
+    def announce(self, kind, seats):
+        if seats:
+            s = self.data
+            s['announcement_serial'] += 1
+            s['announcements'].append(dict(id=s['announcement_serial'], kind=kind, seats=seats))
+            s['announcements'] = s['announcements'][-20:]
+
+    def finish_bidding(self):
+        s = self.data
+        for i, stats in enumerate(s['stats']):
+            called = s['called'][i]
+            stats['calls'] = stats['calls'] + 1 if called else 0
+            stats['passes'] = 0 if called else stats['passes'] + 1
+        for key, threshold, kind in [('passes', 5, 'turtle'), ('calls', 3, 'bidder')]:
+            seats = [i for i, stats in enumerate(s['stats']) if stats[key] >= threshold]
+            self.announce(kind, seats)
+            for i in seats:
+                s['stats'][i][key] = 0
+        if s['taker'] is None:
+            self.new_deal('四人均不叫，重新发牌。')
+        elif CONTRACTS[s['contract']]['exchange']:
+            s.update(phase='discard', turn=s['taker'], kitty_revealed=True,
+                     notice='底牌已公开；庄家请从原手牌中扣六张。')
+        else:
+            s.update(phase='playing', turn=s['first'], notice='不换底牌，底牌保持隐藏。开始第一墩。')
+
+    def finish_awards(self):
+        s = self.data
+        for i, stats in enumerate(s['stats']):
+            won = s['result']['won'] if i == s['taker'] else not s['result']['won']
+            stats['wins'] = stats['wins'] + 1 if won else 0
+            if i == s['taker']:
+                stats['taker_wins'] = stats['taker_wins'] + 1 if won else 0
+        for key, threshold, kind in [('wins', 3, 'streak'), ('taker_wins', 2, 'taker')]:
+            seats = [i for i, stats in enumerate(s['stats']) if stats[key] >= threshold]
+            self.announce(kind, seats)
+            for i in seats:
+                s['stats'][i][key] = 0
 
     def new_deal(self, reason=''):
+        retained = {key: deepcopy(self.data[key]) for key in
+                    ('stats', 'announcements', 'announcement_serial', 'award_epoch', 'restart_poll', 'restart_cooldown')}
         previous_round = self.data['round']
         rejected = 0
         for _ in range(100):
@@ -28,7 +75,8 @@ class Game:
         self.data = dict(phase='bidding', round=previous_round + 1, turn=first, first=first,
             hands=hands, kitty=kitty, discard=[], trick=[], tricks=[], taker=None,
             passed=[], captured=[[], []], adjust2=[0, 0], draft=[], exposed_trumps=[],
-            result=None, excuse_note='', notice=(reason + ' ' if reason else '') +
+            contract=None, bids=[None] * 4, called=[False] * 4, kitty_revealed=False,
+            **retained, result=None, excuse_note='', notice=(reason + ' ' if reason else '') +
             (f'检测到 Petit sec，已重发 {rejected} 次。' if rejected else '') + '发牌完成，轮流叫牌。')
 
     def action(self, seat, action, payload=None):
@@ -38,17 +86,26 @@ class Game:
             raise RuleError('还没轮到你，请等待当前玩家')
         if s['phase'] == 'bidding' and action == 'bid':
             bid = payload.get('bid')
-            if bid not in ('pass', 'take'):
-                raise RuleError('请选择不叫或 Petit ×1')
-            if bid == 'take':
-                s.update(taker=seat, phase='discard', notice='底牌已公开；请从原手牌中扣六张。')
+            if bid == 'take':  # Accept an older client's Prise label during refresh.
+                bid = 'prise'
+            if bid != 'pass' and bid not in CONTRACTS:
+                raise RuleError('请选择不叫或有效合同')
+            if bid != 'pass':
+                current = CONTRACTS[s['contract']]['multiplier'] if s['contract'] else 0
+                if CONTRACTS[bid]['multiplier'] <= current:
+                    raise RuleError('加叫必须高于当前最高合同')
+                s.update(taker=seat, contract=bid)
+                s['bids'][seat] = bid
+                s['called'][seat] = True
             else:
                 s['passed'].append(seat)
-                if len(s['passed']) == 4:
-                    self.new_deal('四人均不叫，重新发牌。')
-                else:
-                    s['turn'] = (seat + 1) % 4
-                    s['notice'] = '上一位玩家不叫，请继续叫牌。'
+            challengers = [i for i in range(4) if i not in s['passed'] and i != s['taker']]
+            if bid == 'contre' or not challengers:
+                self.finish_bidding()
+            else:
+                s['turn'] = next((seat + step) % 4 for step in range(1, 5)
+                                 if (seat + step) % 4 in challengers)
+                s['notice'] = '继续轮流加叫；不叫后退出本轮竞价。'
         elif s['phase'] == 'discard' and action in ('draft', 'discard'):
             selected = payload.get('cards')
             validate_discard(s['hands'][seat], selected, complete=action == 'discard')
@@ -94,21 +151,20 @@ class Game:
                 s['captured'][winner_team].append(play['card'])
                 continue
             owner = 0 if play['seat'] == s['taker'] else 1
-            if last and not fool_slam:
-                owner = 1 - owner
-                s['excuse_note'] = '愚人在最后一墩打出，已转交对方阵营。'
-            elif not last and owner != winner_team:
+            if owner != winner_team:
                 s['adjust2'][owner] -= 1
                 s['adjust2'][winner_team] += 1
                 s['excuse_note'] = '愚人保留给原阵营，并向吃墩方补偿 0.5 分。'
             else:
                 s['excuse_note'] = '愚人以大满贯例外赢得末墩。' if fool_slam else '愚人与本墩均归原阵营，无需补偿。'
             s['captured'][owner].append('F')
-        s['tricks'].append(dict(plays=deepcopy(plays), winner=winner, fool_slam=fool_slam))
+        s['tricks'].append(dict(plays=deepcopy(plays), winner=winner, fool_slam=fool_slam,
+                               kept_fool=fool['seat'] if fool and fool['seat'] != winner else None))
         s['trick'] = []
         if last:
             s.update(phase='finished', turn=None)
             s['result'] = settle(s)
+            self.finish_awards()
             s['notice'] = '本局结束，查看计分明细。'
         else:
             s.update(phase='playing', turn=winner, notice='上一墩已收齐，由赢家先出。')
