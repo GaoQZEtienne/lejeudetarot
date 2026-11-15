@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent
 LOG = logging.getLogger('tarot')
 OUTSIDE_PHASES = ('lobby', 'finished')
 QUICK_CHATS = ['这啥牌', '放心出', '快点吧！', '666', '坏大事', '将牌狂欢！', '我滴任务完成辣！']
+EMOTES = ['😂', '😭', '😎', '😱', '🤔', '😡', '🥳', '👍', '❤️', '🤡', '🐢', '🤯']
 
 
 def token_hash(token):
@@ -44,7 +45,7 @@ class Room:
         self.social_events = []
         self.social_serial = 0
         self.social_times = [0.0] * 4
-        self.durations = dict(bidding=30, discard=90, playing=60, collecting=2, revealing=10)
+        self.durations = dict(bidding=30, discard=90, playing=60, collecting=2, revealing=10, redeal_show=10)
         self.durations.update(durations or {})
         self.connections = [set() for _ in range(4)]
         self.close_tasks = set()
@@ -210,6 +211,37 @@ class Room:
     def bot_observation(self, seat):
         return observation_from_view(self.view(seat))
 
+    def kick_player(self, seat, payload):
+        target = payload.get('seat')
+        if seat != self.host:
+            raise RuleError('只有房主可以移出玩家')
+        if type(target) is not int or target not in range(4) or target == seat or not self.players[target] or self.is_bot(target):
+            raise RuleError('请选择另一位真人玩家')
+        sockets = tuple(self.connections[target])
+        if self.game.data['phase'] in OUTSIDE_PHASES:
+            self.release_seat(target)
+        else:
+            def replace():
+                player = self.players[target]
+                names = {p['name'] for p in self.players if p}
+                suffix = 1
+                while f'接替人机{suffix}' in names:
+                    suffix += 1
+                self.players[target] = dict(name=f'接替人机{suffix}', kind='bot', policy='normal',
+                    total2=player['total2'], joined_round=player['joined_round'])
+                self.game.data['restart_poll'] = None
+                self.game.data['stats'][target] = dict(wins=0, taker_wins=0, calls=0, passes=0)
+            self.transaction(replace, reset_clock=False)
+        self.connections[target].clear()
+        self.social_times[target] = 0
+        self.social_events = [e for e in self.social_events if e['seat'] != target and e.get('target') != target]
+        async def revoke():
+            await asyncio.gather(*(self.send(ws, dict(type='released', message='你已被房主移出房间。')) for ws in sockets))
+            await asyncio.gather(*(ws.close(code=4002, message=b'Removed by host') for ws in sockets))
+        task = asyncio.create_task(revoke())
+        self.close_tasks.add(task)
+        task.add_done_callback(self.close_tasks.discard)
+
     def cancel_bot_turn(self):
         if self.bot_task and not self.bot_task.done():
             self.bot_task.cancel()
@@ -301,6 +333,7 @@ class Room:
             seat=seat, host=self.host, players=players,
             phase=s['phase'], round=s['round'], turn=s['turn'], taker=s['taker'], first=s['first'],
             passed=list(s['passed']), hand=hand, legal=legal, reasons=reasons, kitty=public_kitty,
+            revealed_hands=deepcopy(s['hands']) if s['phase'] == 'redeal_show' else [],
             exposed_trumps=list(s['exposed_trumps']), trick=deepcopy(s['trick']),
             last_trick=deepcopy(s['tricks'][-1]) if s['tricks'] else None,
             trick_number=min(18, len(s['tricks']) + 1), completed=len(s['tricks']),
@@ -315,7 +348,7 @@ class Room:
             kitty_revealed=s['kitty_revealed'], tricks=deepcopy(s['tricks']),
             announcements=deepcopy(s['announcements']), award_epoch=s['award_epoch'],
             social_events=deepcopy([e for e in self.social_events if time.time() - e['time'] < 5]),
-            quick_chats=QUICK_CHATS,
+            quick_chats=QUICK_CHATS, emotes=EMOTES,
             duration=self.durations.get(s['phase'], 0))
 
     async def send(self, ws, data):
@@ -352,7 +385,7 @@ class Room:
         phase = self.game.data['phase']
         def apply():
             self.game.timeout()
-            if phase not in ('collecting', 'revealing'):
+            if phase not in ('collecting', 'revealing', 'redeal_show'):
                 self.game.data['notice'] = '上一操作超时，系统已自动处理。' + self.game.data['notice']
         self.transaction(apply)
         return True
@@ -388,6 +421,10 @@ class Room:
             if payload.get('text') not in QUICK_CHATS:
                 raise RuleError('只能发送预设快捷语')
             event['text'] = payload['text']
+        elif action == 'emote':
+            if payload.get('emoji') not in EMOTES:
+                raise RuleError('请选择预设表情')
+            event['text'] = payload['emoji']
         else:
             target = payload.get('target')
             if type(target) is not int or target not in range(4) or target == seat or not self.players[target]:
@@ -407,7 +444,7 @@ class Room:
         payload = data.get('payload', {})
         if not isinstance(payload, dict):
             raise RuleError('操作格式不正确')
-        if action in ('chat', 'gift'):
+        if action in ('chat', 'gift', 'emote'):
             self.social_action(seat, action, payload)
             return
         if action == 'restart_vote':
@@ -443,6 +480,9 @@ class Room:
             return
         if data.get('revision') != self.revision:
             raise RuleError('牌局状态已更新，请按最新画面重新操作')
+        if action == 'kick':
+            self.kick_player(seat, payload)
+            return
         if action in ('bot_add', 'bot_fill', 'bot_remove', 'bot_set_policy'):
             self.manage_bots(seat, action, payload)
             return

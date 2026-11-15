@@ -132,6 +132,8 @@ def rollout(world, decision, seat, deadline):
     game.action(seat, decision.action, decision.payload)
     normal = NormalPolicy()
     while game.data['phase'] != 'finished':
+        if game.data['phase'] == 'redeal_show':
+            return 0.0
         if time.perf_counter() >= deadline:
             return None
         if game.data['round'] != original_round:

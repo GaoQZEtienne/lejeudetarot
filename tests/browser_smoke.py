@@ -248,6 +248,7 @@ async def main():
                             await page.locator('#award-dialog').wait_for(state='visible')
                             assert await page.locator('#award-title').inner_text() == title
                             await page.locator('#award-close').click()
+                    await wait_state(pages[0], 'state.phase === "bidding"')
                     current = pages[room.game.data['turn']]
                     await current.get_by_role('button', name='Garde sans ×4', exact=True).click()
                     await wait_state(current, '!pending')

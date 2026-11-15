@@ -9,7 +9,7 @@ const el = (tag, className = '', text = '') => {
 };
 const SUITS = {S: '♠', H: '♥', D: '♦', C: '♣', T: '✦', F: '✧'};
 const SUIT_NAMES = {S: '黑桃', H: '红心', D: '方块', C: '梅花', T: '将牌', F: '愚人'};
-const PHASES = {lobby: '等待入座', bidding: '叫牌', discard: '庄家扣牌', playing: '出牌', collecting: '收墩', revealing: '底牌揭晓', finished: '本局结算'};
+const PHASES = {lobby: '等待入座', bidding: '叫牌', discard: '庄家扣牌', playing: '出牌', collecting: '收墩', revealing: '底牌揭晓', redeal_show: '重发前亮牌', finished: '本局结算'};
 const POSITIONS = ['bottom', 'right', 'top', 'left'];
 const BOT_NAMES = {normal: '普通', advanced: '进阶'};
 let state = null, ws = null, pending = null, selection = [], selectionKey = '', retryTimer;
@@ -191,6 +191,7 @@ function connect() {
       if (state) { renderSeats(); renderHand(); renderActions(); renderVote(); renderBots(); renderExtras(); }
     } else if (message.type === 'released') {
       forgetSeat();
+      if (message.message) toast(message.message);
     } else if (message.type === 'auth_error') {
       forgetSeat();
       $('join-error').textContent = message.message;
@@ -236,7 +237,8 @@ function renderSeats() {
     }
     seat.append(avatar);
     const info = el('div');
-    const label = el('div', 'seat-name', player ? player.name : '等待好友');
+    const label = el('div', 'seat-name');
+    label.append(el('span', 'seat-nickname', player ? player.name : '等待好友'));
     label.title = player?.name || '等待好友';
     if (player) label.append(el('span', 'seat-role', (i === state.seat ? '你 ' : '') + (player.kind === 'bot' ? '人机 ' : '') + (i === state.taker && player.played_this_round ? '庄家' : i === state.host ? '房主' : '')));
     const detail = el('div', 'seat-detail');
@@ -298,6 +300,32 @@ function renderBots() {
 
 $('bot-policy').addEventListener('change', () => { if (state) renderBots(); });
 
+function renderRoomUpdates() {
+  const management = $('player-management');
+  management.replaceChildren();
+  management.hidden = state.seat !== state.host;
+  if (!management.hidden) {
+    management.append(el('span', '', ['lobby', 'finished'].includes(state.phase) ? '管理玩家' : '管理玩家 · 局内移出由人机接替'));
+    state.players.forEach((player, seat) => {
+      if (!player || player.kind === 'bot' || seat === state.seat) return;
+      const button = actionButton(`移出 ${player.name}`, 'kick', {seat}, true, false);
+      button.title = ['lobby', 'finished'].includes(state.phase) ? '移出后释放座位' : '移出后由普通人机接替，保留当前牌局和座位积分';
+      management.append(button);
+    });
+  }
+  $('redeal-panel').hidden = state.phase !== 'redeal_show';
+  $('redeal-hands').replaceChildren();
+  if (state.phase === 'redeal_show') {
+    [...state.revealed_hands, state.kitty].forEach((cards, seat) => {
+      const group = el('div', 'redeal-group');
+      group.append(el('h3', '', seat === 4 ? '六张底牌' : name(seat)));
+      const hand = el('div', 'mini-hand');
+      hand.append(...cards.map(card => cardElement(card)));
+      group.append(hand); $('redeal-hands').append(group);
+    });
+  }
+}
+
 function renderTable() {
   const center = $('table-center');
   center.replaceChildren();
@@ -309,7 +337,8 @@ function renderTable() {
     const occupied = state.players.filter(Boolean).length;
     const online = state.players.filter(p => p?.online).length;
     let title, detail;
-    if (state.phase === 'lobby') { title = `${occupied} / 4 已入座`; detail = online === 4 ? '四人到齐，等待房主开始' : '邀请好友，或由房主添加人机'; }
+    if (state.phase === 'redeal_show') { title = '四人均不叫'; detail = '下方展示原手牌与底牌，稍后自动重发'; }
+    else if (state.phase === 'lobby') { title = `${occupied} / 4 已入座`; detail = online === 4 ? '四人到齐，等待房主开始' : '邀请好友，或由房主添加人机'; }
     else if (state.phase === 'bidding') { title = state.contract ? contractName(state.contract) : '叫分，还是不叫？'; detail = `等待 ${name(state.turn)} 叫分`; }
     else if (state.phase === 'discard') { title = '庄家正在扣牌'; detail = '从原手牌中扣六张，再收入底牌'; }
     else if (state.phase === 'finished') { title = '本局结束'; detail = '最后一张落定，看看这局的收获'; }
@@ -370,7 +399,7 @@ function renderActions() {
     if (state.seat === state.host) $('actions').append(actionButton(state.phase === 'finished' ? '开始下一局 →' : '开始游戏 →', 'start', {}, ready));
     note = ready ? (state.seat === state.host ? '四人到齐，可以开始。' : '等待房主开始。') : '四位玩家全部在线后即可开始。';
   } else if (state.turn !== state.seat) {
-    note = state.phase === 'revealing' ? '底牌展示中，结束后自动结算。' : state.turn === null ? '正在收墩…' : `等待 ${name(state.turn)} 操作`;
+    note = state.phase === 'redeal_show' ? '原手牌展示中，结束后自动重发。' : state.phase === 'revealing' ? '底牌展示中，结束后自动结算。' : state.turn === null ? '正在收墩…' : `等待 ${name(state.turn)} 操作`;
   } else if (state.phase === 'bidding') {
     note = '叫牌后，你将独自对抗另外三位。';
     $('actions').append(actionButton('不叫', 'bid', {bid: 'pass'}, true, false));
@@ -473,6 +502,7 @@ function render() {
 
 function updateClock() {
   renderVote();
+  if (state?.phase === 'redeal_show') $('redeal-countdown').textContent = state.paused ? '真人全部离线，展示已暂停。' : `展示结束后自动重发 · ${Math.max(0, Math.ceil(state.deadline - (Date.now() + clockOffset) / 1000))}s`;
   if (!state?.deadline) { $('timer').textContent = '—'; $('reveal-timer').textContent = state?.paused ? '已暂停' : '—'; return; }
   const remaining = Math.max(0, Math.ceil((state.deadline * 1000 - Date.now() - clockOffset) / 1000));
   $('timer').textContent = remaining + 's';
@@ -617,9 +647,10 @@ function showSocialEvent(event) {
   const remaining = 5000 - (Date.now() + clockOffset - event.time * 1000);
   if (remaining <= 0) return;
   const layer = $('table-effects');
-  if (event.kind === 'chat') {
+  if (event.kind === 'chat' || event.kind === 'emote') {
     layer.querySelector(`.speech-bubble[data-speaker="${event.seat}"]`)?.remove();
     const bubble = el('div', `speech-bubble ${pos(event.seat)}`, event.text);
+    bubble.classList.toggle('emote-bubble', event.kind === 'emote');
     bubble.dataset.speaker = String(event.seat);
     bubble.setAttribute('aria-label', `${event.name}说：${event.text}`);
     layer.append(bubble);
@@ -682,6 +713,7 @@ function showSocialEvent(event) {
   expireEffect(flight, Math.min(2400, remaining));
 }
 function renderExtras() {
+  renderRoomUpdates();
   $('scoreboard').replaceChildren();
   [...state.players].filter(Boolean).sort((a, b) => b.total - a.total).forEach((p, rank) => {
     const row = el('div', 'score-row');
@@ -690,6 +722,12 @@ function renderExtras() {
   });
   $('quick-chat').replaceChildren(...state.quick_chats.map(text => {
     const button = actionButton(text, 'chat', {text}, true, false);
+    button.addEventListener('click', closeTablePickers);
+    return button;
+  }));
+  $('emote-options').replaceChildren(...(state.emotes || []).map(emoji => {
+    const button = actionButton(emoji, 'emote', {emoji}, true, false);
+    button.setAttribute('aria-label', `亮出表情 ${emoji}`);
     button.addEventListener('click', closeTablePickers);
     return button;
   }));

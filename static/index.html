@@ -53,12 +53,14 @@
         <div id="trick-cards" class="trick-cards"></div>
         <div id="table-effects" class="table-effects" aria-live="polite"></div>
         <button id="chat-open" class="table-chat-button" aria-expanded="false" aria-controls="chat-picker">💬 快捷语</button>
-        <div id="chat-picker" class="table-picker chat-picker" hidden><div class="picker-heading"><b>快捷语</b><button id="chat-close" class="picker-close" aria-label="关闭快捷语">×</button></div><div id="quick-chat" class="quick-chat"></div></div>
+        <div id="chat-picker" class="table-picker chat-picker" hidden><div class="picker-heading"><b>快捷语与表情</b><button id="chat-close" class="picker-close" aria-label="关闭快捷语">×</button></div><div id="quick-chat" class="quick-chat"></div><div id="emote-options" class="emote-options" aria-label="选择表情"></div></div>
         <div id="gift-picker" class="table-picker gift-picker" hidden role="group" aria-labelledby="gift-label"><div class="picker-heading"><b id="gift-label">送给好友</b><button id="gift-close" class="picker-close" aria-label="关闭礼物选择">×</button></div><div class="gift-options"><button id="flower-button" class="button quiet">💐 鲜花</button><button id="egg-button" class="button quiet">🥚 鸡蛋</button></div></div>
         <div id="reveal-panel" class="reveal-panel" hidden aria-label="结算前亮底牌"><h2>底牌揭晓</h2><div id="reveal-cards" class="mini-hand"></div><p>展示结束后结算 · <b id="reveal-timer">10s</b></p></div>
         <div class="table-caption">JEU DE TAROT <span>✦</span> <span id="contract-label">等待叫分</span></div>
       </div>
       <div class="below-table"><span id="notice" role="status"></span><button id="last-open" class="text-button" disabled>查看上一墩 ↗</button></div>
+      <section id="redeal-panel" class="redeal-panel" hidden><h2>全员不叫 · 原手牌公示</h2><p id="redeal-countdown"></p><div id="redeal-hands"></div></section>
+      <section id="player-management" class="player-management" hidden aria-label="房主管理玩家"></section>
       <section id="bot-panel" class="bot-panel" hidden aria-label="人机补位">
         <div class="bot-panel-heading"><div><h2>人机补位 <span id="bot-count"></span></h2><p id="bot-help"></p></div><div class="bot-controls"><label id="bot-policy-label" for="bot-policy">新增难度 <select id="bot-policy"><option value="normal">普通</option><option value="advanced">进阶</option></select></label><div id="bot-actions" class="actions"></div></div></div>
         <div id="bot-roster" class="bot-roster"></div>
@@ -100,7 +102,8 @@
       <div class="rule-targets"><span>0 Bout<b>56 分</b></span><span>1 Bout<b>51 分</b></span><span>2 Bout<b>41 分</b></span><span>3 Bout<b>36 分</b></span></div>
       <p>Bout 指将牌 1、21 和愚人。庄家结算时拥有的 Bout 决定目标，达到即获胜。R/Bout 各 4.5 分，D 3.5、C 2.5、V 1.5，其余 0.5，总牌分 91。</p>
       <p><b>结算。</b>（基础 25 加得失分差，按胜负取正负，再加末将 ±10）乘合同倍数，再加自然大满贯 ±200。庄家收付三份，防守者各一份，四人成绩总和为零。</p>
-      <p><b>倒计时。</b>叫牌 30 秒、扣牌 90 秒、出牌 60 秒，最后 5 秒提示音。到期自动不叫、合法扣牌或随机合法出牌。全员离线时牌局暂停。</p>
+      <p><b>倒计时与重发。</b>叫牌 30 秒、扣牌 90 秒、出牌 60 秒，最后 5 秒提示音。到期自动不叫、合法扣牌或随机合法出牌。四人均不叫时，先公开四家原手牌与底牌 10 秒，再自动重发。真人全部离线时牌局暂停。</p>
+      <p><b>移出与表情。</b>房主可在“管理玩家”移出其他真人，其全部标签页退出。局外释放座位；局内由普通人机接替手牌和座位积分，成就计数重置，保持对局继续。点击快捷语可亮出表情，在头像旁展示 5 秒。</p>
       <p><b>人机。</b>房主可在等待开局或结算后选择难度、点击空座位添加人机或一键补齐，逐个调整难度，也可移除人机供好友入座。局内不能换人或改难度。普通版会记牌、评估叫分和扣牌、配合队友；进阶版增加未知牌采样与限时模拟。人机不读取他人手牌；真人全部离线时暂停。房主仅在真人间转交，局外最后一位真人离开时清空人机。</p>
       <p><b>重开。</b>仅真人投票，限时 20 秒，发起者计一票，两位真人同意即清空积分并回到准备界面；只有一位真人时可直接重开。拒绝票达到无法通过的数量，或超时未通过，则失败并冷却 120 秒。投票不暂停出牌计时。服务重启会清空房间与积分，所有人重新填写昵称。</p>
       <p><b>Petit sec。</b>发牌后仅有将牌 1，既无其他将牌也无愚人时，自动重发。</p>

@@ -80,6 +80,9 @@ class RulesTests(unittest.TestCase):
             game.action((game.data['turn'] + 1) % 4, 'bid', {'bid': 'take'})
         for _ in range(4):
             game.action(game.data['turn'], 'bid', {'bid': 'pass'})
+        self.assertEqual(game.data['round'], 1)
+        self.assertEqual(game.data['phase'], 'redeal_show')
+        game.timeout()
         self.assertEqual(game.data['round'], 2)
         self.assertEqual(game.data['phase'], 'bidding')
         self.assertIn('四人均不叫', game.data['notice'])
@@ -184,7 +187,7 @@ class RulesTests(unittest.TestCase):
     def test_achievement_counts_and_resets(self):
         game = Game()
         game.new_deal()
-        for _ in range(20):
+        for _ in range(25):
             game.timeout()
         self.assertEqual(game.data['round'], 6)
         self.assertEqual(game.data['announcements'][-1]['kind'], 'turtle')

@@ -37,7 +37,8 @@ class Game:
             for i in seats:
                 s['stats'][i][key] = 0
         if s['taker'] is None:
-            self.new_deal('四人均不叫，重新发牌。')
+            s.update(phase='redeal_show', turn=None, kitty_revealed=True,
+                     notice='四人均不叫，展示所有原手牌与底牌 10 秒后重新发牌。')
         elif CONTRACTS[s['contract']]['exchange']:
             s.update(phase='discard', turn=s['taker'], kitty_revealed=True,
                      notice='底牌已公开；庄家请从原手牌中扣六张。')
@@ -179,7 +180,9 @@ class Game:
 
     def timeout(self):
         s = self.data
-        if s['phase'] == 'bidding':
+        if s['phase'] == 'redeal_show':
+            self.new_deal('四人均不叫，亮牌结束，重新发牌。')
+        elif s['phase'] == 'bidding':
             self.action(s['turn'], 'bid', {'bid': 'pass'})
         elif s['phase'] == 'discard':
             self.action(s['turn'], 'discard', {'cards': auto_discard(s['hands'][s['turn']], s['draft'])})

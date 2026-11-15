@@ -90,6 +90,10 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         await self.act(self.room.host, 'start')
 
     async def take(self):
+        if self.room.game.data['phase'] == 'redeal_show':
+            async with self.room.lock:
+                self.room.deadline = time.time() - 1
+            await self.peers[0].wait(lambda s: s['phase'] == 'bidding')
         await self.act(self.room.game.data['turn'], 'bid', {'bid': 'take'})
         while self.room.game.data['phase'] == 'bidding':
             await self.act(self.room.game.data['turn'], 'bid', {'bid': 'pass'})
@@ -112,8 +116,9 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(set(sum((p.state['hand'] for p in self.peers), []))), 72)
         for _ in range(4):
             await self.act(self.room.game.data['turn'], 'bid', {'bid': 'pass'})
-        self.assertEqual(self.room.game.data['round'], 2)
+        self.assertEqual(self.room.game.data['phase'], 'redeal_show')
         await self.take()
+        self.assertEqual(self.room.game.data['round'], 2)
         seat = self.room.game.data['turn']
         old_hand = self.peers[seat].state['hand']
         old_deadline = self.room.deadline
